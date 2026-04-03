@@ -1,0 +1,669 @@
+'use client'
+import { useState, useEffect } from 'react'
+import { Upload, MessageSquare, FileText, Loader2, Crown, Send, X, User, Mail, ChevronRight, Check, Shield } from 'lucide-react'
+
+// ── PDF.js loader ─────────────────────────────────────────────────────────────
+function usePdfJs() {
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if ((window as any)['pdfjs-dist/build/pdf']) { setReady(true); return }
+    const s = document.createElement('script')
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+    s.onload = () => setReady(true)
+    document.head.appendChild(s)
+  }, [])
+  return ready
+}
+
+async function extractText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      try {
+        const pdfjsLib = (window as any)['pdfjs-dist/build/pdf']
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+        const pdf = await pdfjsLib.getDocument({ data: e.target!.result }).promise
+        let text = ''
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i)
+          const content = await page.getTextContent()
+          text += `\n\n--- Page ${i} of ${pdf.numPages} ---\n`
+          text += content.items.map((item: any) => item.str).join(' ')
+        }
+        resolve(text.trim())
+      } catch (err) { reject(err) }
+    }
+    reader.onerror = reject
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface User { id: string; name: string; email: string; plan: string; pdf_used: number }
+interface Message { role: string; text: string }
+
+// ── Modal shell ───────────────────────────────────────────────────────────────
+function Modal({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full relative">
+        {onClose && (
+          <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-gray-700">
+            <X className="w-5 h-5" />
+          </button>
+        )}
+        {children}
+      </div>
+    </div>
+  )
+}
+
+// ── Sign Up ───────────────────────────────────────────────────────────────────
+function SignupModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: (u: User) => void }) {
+  const [tab, setTab] = useState<'signup' | 'login'>('signup')
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [err, setErr] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const clearErr = () => setErr('')
+
+  const handleSignup = async () => {
+    if (!name.trim()) { setErr('Please enter your name.'); return }
+    if (!/\S+@\S+\.\S+/.test(email)) { setErr('Please enter a valid email.'); return }
+    if (password.length < 6) { setErr('Password must be at least 6 characters.'); return }
+    setLoading(true)
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, password })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      onSuccess(data.user)
+    } catch (e: any) { setErr(e.message) }
+    setLoading(false)
+  }
+
+  const handleLogin = async () => {
+    if (!/\S+@\S+\.\S+/.test(email)) { setErr('Please enter a valid email.'); return }
+    if (!password) { setErr('Please enter your password.'); return }
+    setLoading(true)
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      onSuccess(data.user)
+    } catch (e: any) { setErr(e.message) }
+    setLoading(false)
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <div className="p-8">
+        {/* Header */}
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+            <User className="w-5 h-5 text-blue-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold">Welcome to PDF Summarizer</h2>
+            <p className="text-sm text-gray-500">Free — includes 1 PDF summary</p>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex bg-gray-100 rounded-lg p-1 mb-6">
+          <button
+            onClick={() => { setTab('signup'); clearErr() }}
+            className={`flex-1 py-2 text-sm font-semibold rounded-md transition ${tab === 'signup' ? 'bg-white text-blue-700 shadow' : 'text-gray-500 hover:text-gray-700'}`}>
+            Sign Up
+          </button>
+          <button
+            onClick={() => { setTab('login'); clearErr() }}
+            className={`flex-1 py-2 text-sm font-semibold rounded-md transition ${tab === 'login' ? 'bg-white text-blue-700 shadow' : 'text-gray-500 hover:text-gray-700'}`}>
+            Log In
+          </button>
+        </div>
+
+        {/* Fields */}
+        <div className="space-y-4">
+          {tab === 'signup' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+              <input value={name} onChange={e => { setName(e.target.value); clearErr() }}
+                type="text" placeholder="Jane Doe"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <input value={email} onChange={e => { setEmail(e.target.value); clearErr() }}
+              type="email" placeholder="jane@example.com"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <input value={password} onChange={e => { setPassword(e.target.value); clearErr() }}
+              type="password"
+              placeholder={tab === 'signup' ? 'Min 6 characters' : 'Enter your password'}
+              onKeyDown={e => e.key === 'Enter' && (tab === 'signup' ? handleSignup() : handleLogin())}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+          </div>
+
+          {err && <p className="text-red-500 text-sm bg-red-50 px-3 py-2 rounded-lg">{err}</p>}
+
+          <button
+            onClick={tab === 'signup' ? handleSignup : handleLogin}
+            disabled={loading}
+            className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2">
+            {loading
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : tab === 'signup'
+              ? <>Create Account <ChevronRight className="w-4 h-4" /></>
+              : <>Log In <ChevronRight className="w-4 h-4" /></>}
+          </button>
+
+          {/* Switch tab hint */}
+          <p className="text-center text-sm text-gray-500">
+            {tab === 'signup'
+              ? <>Already have an account?{' '}
+                  <button onClick={() => { setTab('login'); clearErr() }} className="text-blue-600 font-semibold hover:underline">Log in</button></>
+              : <>Don't have an account?{' '}
+                  <button onClick={() => { setTab('signup'); clearErr() }} className="text-blue-600 font-semibold hover:underline">Sign up free</button></>}
+          </p>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// ── Paywall ───────────────────────────────────────────────────────────────────
+const PLANS = [
+  { id: 'monthly', label: 'Monthly', price: '$2.99', period: '/mo', desc: 'Billed monthly' },
+  { id: 'yearly', label: 'Yearly', price: '$1.99', period: '/mo', desc: 'Billed $23.88/yr · Save 33%' },
+]
+
+function PaywallModal({ user, onClose }: { user: User; onClose: () => void }) {
+  const [plan, setPlan] = useState('yearly')
+  const [loading, setLoading] = useState(false)
+
+  const subscribe = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan, userId: user.id, email: user.email })
+      })
+      const { url } = await res.json()
+      window.location.href = url
+    } catch {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <div className="p-8">
+        <div className="text-center mb-6">
+          <div className="w-14 h-14 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-full flex items-center justify-center mx-auto mb-3">
+            <Crown className="w-7 h-7 text-white" />
+          </div>
+          <h2 className="text-2xl font-bold">Unlock Unlimited Access</h2>
+          <p className="text-gray-500 text-sm mt-1">You've used your 1 free summary. Upgrade to continue.</p>
+        </div>
+        <div className="space-y-3 mb-5">
+          {PLANS.map(p => (
+            <button key={p.id} onClick={() => setPlan(p.id)}
+              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border-2 transition ${plan === p.id ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+              <div className="text-left">
+                <div className="font-semibold text-sm">{p.label}</div>
+                <div className="text-xs text-gray-500">{p.desc}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-blue-700">{p.price}
+                  <span className="text-xs font-normal text-gray-500">{p.period}</span>
+                </span>
+                {plan === p.id && (
+                  <div className="w-5 h-5 bg-blue-600 rounded-full flex items-center justify-center">
+                    <Check className="w-3 h-3 text-white" />
+                  </div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+        <ul className="text-sm text-gray-600 space-y-2 mb-5">
+          {['Unlimited PDF summaries', 'Full Q&A on every document', 'Priority processing'].map(f => (
+            <li key={f} className="flex items-center gap-2">
+              <Check className="w-4 h-4 text-green-500 flex-shrink-0" />{f}
+            </li>
+          ))}
+        </ul>
+        <button onClick={subscribe} disabled={loading}
+          className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2">
+          {loading
+            ? <><Loader2 className="w-4 h-4 animate-spin" /> Redirecting to payment…</>
+            : <>Continue to Payment <ChevronRight className="w-4 h-4" /></>}
+        </button>
+      </div>
+    </Modal>
+  )
+}
+
+// ── Admin Panel ───────────────────────────────────────────────────────────────
+function AdminPanel({ onClose }: { onClose: () => void }) {
+  const [users, setUsers] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [authed, setAuthed] = useState(false)
+  const [adminPass, setAdminPass] = useState('')
+  const [passErr, setPassErr] = useState('')
+
+  // ← Change this to your own secret password
+  const ADMIN_PASSWORD = 'pdfadmin2026'
+
+  // This hook is always called — required by React rules
+  useEffect(() => {
+    if (authed) fetchUsers()
+  }, [authed])
+
+  const fetchUsers = () => {
+    setLoading(true)
+    fetch('/api/admin/users')
+      .then(r => r.json())
+      .then(d => { setUsers(d.users || []); setLoading(false) })
+  }
+
+  const handleLogin = () => {
+    if (adminPass === ADMIN_PASSWORD) {
+      setAuthed(true)
+    } else {
+      setPassErr('Incorrect password. Try again.')
+    }
+  }
+
+  const handleAction = async (action: string, userId: string, subscriptionId: string | null) => {
+    const confirmMsg = action === 'refund'
+      ? 'Issue a refund AND cancel this subscription? This cannot be undone.'
+      : 'Cancel this subscription? This cannot be undone.'
+    if (!window.confirm(confirmMsg)) return
+    setActionLoading(userId + action)
+    try {
+      const res = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, userId, subscriptionId })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      alert('✅ ' + data.message)
+      fetchUsers()
+    } catch (e: any) {
+      alert('Error: ' + e.message)
+    }
+    setActionLoading(null)
+  }
+
+  const exportToCSV = () => {
+    const headers = ['Name', 'Email', 'Plan', 'PDFs Used', 'Joined']
+    const rows = users.map(u => [
+      u.name,
+      u.email,
+      u.plan,
+      u.pdf_used || 0,
+      new Date(u.created_at).toLocaleDateString()
+    ])
+    const csv = [headers, ...rows]
+      .map(r => r.map((v: any) => `"${v}"`).join(','))
+      .join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `users-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const badge = (p: string) =>
+    p === 'free' ? 'bg-gray-100 text-gray-600' :
+    p === 'monthly' ? 'bg-blue-100 text-blue-700' :
+    'bg-yellow-100 text-yellow-700'
+
+  // ── Password screen — shown first ─────────────────────────────────────────
+  if (!authed) return (
+    <Modal onClose={onClose}>
+      <div className="p-8">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
+            <Shield className="w-5 h-5 text-purple-600" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold">Admin Access</h2>
+            <p className="text-sm text-gray-500">Enter your admin password to continue</p>
+          </div>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Admin Password</label>
+            <input
+              type="password"
+              value={adminPass}
+              onChange={e => { setAdminPass(e.target.value); setPassErr('') }}
+              onKeyDown={e => e.key === 'Enter' && handleLogin()}
+              placeholder="Enter password"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm" />
+          </div>
+          {passErr && <p className="text-red-500 text-sm bg-red-50 px-3 py-2 rounded-lg">{passErr}</p>}
+          <button onClick={handleLogin}
+            className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition flex items-center justify-center gap-2">
+            <Shield className="w-4 h-4" /> Access Admin Panel
+          </button>
+        </div>
+      </div>
+    </Modal>
+  )
+
+  // ── User list screen — shown after correct password ───────────────────────
+  return (
+    <Modal onClose={onClose}>
+      <div className="p-8">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
+              <Shield className="w-5 h-5 text-purple-600" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold">Admin — User List</h2>
+              <p className="text-sm text-gray-500">{users.length} user{users.length !== 1 ? 's' : ''} registered</p>
+            </div>
+          </div>
+          <button onClick={exportToCSV}
+            className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-full hover:bg-green-700 transition">
+            ⬇️ Export CSV
+          </button>
+        </div>
+        {loading
+          ? <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-400 w-6 h-6" /></div>
+          : users.length === 0
+          ? <p className="text-center text-gray-400 py-8 text-sm">No users yet.</p>
+          : <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+              {users.map(u => (
+                <div key={u.id} className="bg-gray-50 rounded-xl px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-semibold text-sm">{u.name}</div>
+                      <div className="text-xs text-gray-500 flex items-center gap-1">
+                        <Mail className="w-3 h-3" />{u.email}
+                      </div>
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        Joined {new Date(u.created_at).toLocaleDateString()} · {u.pdf_used || 0} PDFs used
+                      </div>
+                    </div>
+                    <span className={`text-xs font-semibold px-2 py-1 rounded-full capitalize ${badge(u.plan)}`}>
+                      {u.plan === 'free' ? 'Free' : u.plan === 'monthly' ? 'Monthly Pro' : 'Yearly Pro'}
+                    </span>
+                  </div>
+                  {u.plan !== 'free' && (
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={() => handleAction('cancel', u.id, u.stripe_subscription_id)}
+                        disabled={!!actionLoading}
+                        className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-lg hover:bg-orange-200 transition disabled:opacity-50">
+                        {actionLoading === u.id + 'cancel' ? '...' : '⛔ Cancel'}
+                      </button>
+                      <button
+                        onClick={() => handleAction('refund', u.id, u.stripe_subscription_id)}
+                        disabled={!!actionLoading}
+                        className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-lg hover:bg-red-200 transition disabled:opacity-50">
+                        {actionLoading === u.id + 'refund' ? '...' : '💸 Refund'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+        }
+      </div>
+    </Modal>
+  )
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const pdfJsReady = usePdfJs()
+  const [user, setUser] = useState<User | null>(null)
+  const [pdfFile, setPdfFile] = useState<File | null>(null)
+  const [pdfText, setPdfText] = useState('')
+  const [summary, setSummary] = useState('')
+  const [messages, setMessages] = useState<Message[]>([])
+  const [question, setQuestion] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [status, setStatus] = useState('')
+  const [instructions, setInstructions] = useState('')
+  const [modal, setModal] = useState<string | null>(null)
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('success') === 'true') {
+      alert('🎉 Payment successful! Your Pro plan is now active.')
+      window.history.replaceState({}, '', '/')
+    }
+  }, [])
+
+  const isPro = user?.plan === 'monthly' || user?.plan === 'yearly'
+  const hasUsed = (user?.pdf_used || 0) >= 1
+  const canUpload = user && (isPro || !hasUsed)
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || file.type !== 'application/pdf') { alert('Please upload a PDF file.'); return }
+    if (!user) { setModal('signup'); return }
+    if (!canUpload) { setModal('paywall'); return }
+    setPdfFile(file)
+    setSummary('')
+    setMessages([])
+    setPdfText('')
+  }
+
+  const handleSummarize = async () => {
+    if (!pdfFile || !user) return
+    if (!pdfJsReady) { alert('PDF reader loading, please wait.'); return }
+    setLoading(true)
+    setSummary('')
+    setStatus('📄 Reading PDF...')
+    try {
+      const text = await extractText(pdfFile)
+      if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
+      setPdfText(text)
+      setStatus('🤖 Generating summary...')
+      const res = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id, text, instructions })
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        if (data.error === 'upgrade_required') { setModal('paywall'); return }
+        throw new Error(data.error)
+      }
+      setSummary(data.summary)
+      setUser(prev => prev ? { ...prev, pdf_used: (prev.pdf_used || 0) + 1 } : prev)
+    } catch (e: any) {
+      alert('Error: ' + e.message)
+    } finally {
+      setLoading(false)
+      setStatus('')
+    }
+  }
+
+  const handleAsk = async () => {
+    if (!question.trim() || !pdfText) return
+    const q = question
+    setQuestion('')
+    setMessages(prev => [...prev, { role: 'user', text: q }])
+    setLoading(true)
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, documentText: pdfText })
+      })
+      const data = await res.json()
+      setMessages(prev => [...prev, { role: 'assistant', text: data.answer || data.error }])
+    } catch (e: any) {
+      setMessages(prev => [...prev, { role: 'assistant', text: 'Error: ' + e.message }])
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+      {modal === 'signup' && (
+        <SignupModal onClose={() => setModal(null)} onSuccess={u => { setUser(u); setModal(null) }} />
+      )}
+      {modal === 'paywall' && user && (
+        <PaywallModal user={user} onClose={() => setModal(null)} />
+      )}
+      {modal === 'admin' && (
+        <AdminPanel onClose={() => setModal(null)} />
+      )}
+
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
+
+          {/* Header */}
+          <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <FileText className="w-8 h-8" />
+                <div>
+                  <h1 className="text-2xl font-bold">PDF Summarizer & Q&A</h1>
+                  <p className="text-blue-100 text-sm">AI-powered document analysis</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setModal('admin')}
+                  className="text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-3 py-1.5 rounded-full flex items-center gap-1 transition">
+                  <Shield className="w-3 h-3" /> Admin
+                </button>
+                {user ? (
+                  <div className="flex items-center gap-2 ml-2">
+                    <div className="text-right text-sm">
+                      <div className="font-semibold">{user.name}</div>
+                      <div className="text-blue-200 text-xs">{isPro ? 'Pro Member' : 'Free (1 PDF)'}</div>
+                    </div>
+                    {isPro
+                      ? <Crown className="w-5 h-5 text-yellow-300" />
+                      : <button onClick={() => setModal('paywall')}
+                          className="text-xs bg-yellow-400 text-yellow-900 font-semibold px-3 py-1.5 rounded-full hover:bg-yellow-300 transition">
+                          Upgrade
+                        </button>
+                    }
+                  </div>
+                ) : (
+                  <button onClick={() => setModal('signup')}
+                    className="ml-2 text-sm bg-white text-blue-700 font-semibold px-4 py-2 rounded-full hover:bg-blue-50 transition">
+                    Sign Up Free
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Upload */}
+          <div className="p-6 border-b">
+            <label
+              className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-xl transition-colors
+                ${canUpload
+                  ? 'border-gray-300 hover:border-blue-500 hover:bg-blue-50 cursor-pointer'
+                  : 'border-gray-200 bg-gray-50 cursor-pointer'}`}
+              onClick={!canUpload ? () => user ? setModal('paywall') : setModal('signup') : undefined}>
+              <Upload className={`w-8 h-8 mb-2 ${canUpload ? 'text-gray-400' : 'text-gray-300'}`} />
+              <p className={`text-sm font-medium ${canUpload ? 'text-gray-600' : 'text-gray-400'}`}>
+                {pdfFile ? pdfFile.name : canUpload ? 'Click to upload a PDF' : !user ? 'Sign up to get started' : 'Upgrade to upload more PDFs'}
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                {canUpload ? 'PDF files only' : !user ? 'Free — includes 1 PDF summary' : '1 free summary used'}
+              </p>
+              {canUpload && (
+                <input type="file" className="hidden" accept="application/pdf" onChange={handleFileChange} />
+              )}
+            </label>
+
+            <input
+              type="text"
+              value={instructions}
+              onChange={e => setInstructions(e.target.value)}
+              placeholder="Optional instructions (e.g. focus on methodology section)"
+              className="mt-4 w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+
+            {pdfFile && (
+              <button onClick={handleSummarize} disabled={loading}
+                className="mt-4 w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2">
+                {loading
+                  ? <><Loader2 className="w-5 h-5 animate-spin" />{status || 'Processing…'}</>
+                  : <><Send className="w-5 h-5" /> Summarize PDF</>}
+              </button>
+            )}
+          </div>
+
+          {/* Summary */}
+          {summary && (
+            <div className="p-6 border-b bg-gray-50">
+              <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                <FileText className="w-5 h-5 text-blue-600" /> Summary
+              </h2>
+              <div className="bg-white p-4 rounded-lg border border-gray-200 max-h-96 overflow-y-auto">
+                <p className="text-gray-700 whitespace-pre-wrap text-sm leading-relaxed">{summary}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Q&A */}
+          {summary && (
+            <div className="p-6">
+              <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-blue-600" /> Ask Questions
+              </h2>
+              <div className="space-y-3 mb-4 max-h-80 overflow-y-auto">
+                {messages.map((m, i) => (
+                  <div key={i} className={`p-3 rounded-xl text-sm ${m.role === 'user' ? 'bg-blue-100 ml-8' : 'bg-gray-100 mr-8'}`}>
+                    <p className="font-semibold mb-1 text-xs uppercase tracking-wide text-gray-500">
+                      {m.role === 'user' ? 'You' : 'Assistant'}
+                    </p>
+                    <p className="text-gray-700 whitespace-pre-wrap">{m.text}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={question}
+                  onChange={e => setQuestion(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleAsk()}
+                  placeholder="Ask a question about this document…"
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={loading} />
+                <button onClick={handleAsk} disabled={loading || !question.trim()}
+                  className="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 transition flex items-center gap-2 text-sm">
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />} Ask
+                </button>
+              </div>
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  )
+}
