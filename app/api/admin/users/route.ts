@@ -1,16 +1,16 @@
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse, NextRequest } from 'next/server'
 import Stripe from 'stripe'
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
-
 export async function GET() {
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY!
+  )
+
   try {
     const { data, error } = await supabaseAdmin
       .from('users').select('*').order('created_at', { ascending: false })
@@ -36,6 +36,12 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY!
+  )
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
+
   try {
     const { action, userId, subscriptionId } = await req.json()
 
