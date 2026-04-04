@@ -501,15 +501,27 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: user.id, text, instructions })
       })
-      const data = await res.json()
+
+      // Handle non-JSON responses gracefully
+      const rawText = await res.text()
+      let data: any = {}
+      try {
+        data = JSON.parse(rawText)
+      } catch {
+        throw new Error('The request timed out. Your document may be too large. Please try a smaller PDF or split it into sections.')
+      }
+
       if (!res.ok) {
         if (data.error === 'upgrade_required') { setModal('paywall'); return }
         throw new Error(data.error)
       }
       setSummary(data.summary)
       setUser(prev => prev ? { ...prev, pdf_used: (prev.pdf_used || 0) + 1 } : prev)
-    } catch (e: any) { alert('Error: ' + e.message) }
-    finally { setLoading(false); setStatus('') }
+    } catch (e: any) {
+      alert('Error: ' + e.message)
+    } finally {
+      setLoading(false); setStatus('')
+    }
   }
 
   const handleAsk = async () => {
