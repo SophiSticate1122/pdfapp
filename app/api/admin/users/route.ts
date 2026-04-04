@@ -1,23 +1,30 @@
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-import { createClient } from '@supabase/supabase-js'
 import { NextResponse, NextRequest } from 'next/server'
-import Stripe from 'stripe'
+
+function getSupabaseAdmin() {
+  const { createClient } = require('@supabase/supabase-js')
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  )
+}
+
+function getStripe() {
+  const Stripe = require('stripe')
+  return new Stripe(process.env.STRIPE_SECRET_KEY)
+}
 
 export async function GET() {
-  const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!
-  )
-
   try {
+    const supabaseAdmin = getSupabaseAdmin()
     const { data, error } = await supabaseAdmin
       .from('users').select('*').order('created_at', { ascending: false })
 
     if (error || !data || data.length === 0) {
       const { data: authData } = await supabaseAdmin.auth.admin.listUsers()
-      const users = (authData?.users || []).map(u => ({
+      const users = (authData?.users || []).map((u: any) => ({
         id: u.id,
         name: u.user_metadata?.name || 'Unknown',
         email: u.email,
@@ -36,15 +43,40 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!
-  )
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
-
   try {
-    const { action, userId, subscriptionId } = await req.json()
+    const supabaseAdmin = getSupabaseAdmin()
+    const stripe = getStripe()
+    const { action, userId, subscriptionId, email } = await req.json()
 
+    // ── Delete user ──
+    if (action === 'delete') {
+      await supabaseAdmin.from('users').delete().eq('id', userId)
+      await supabaseAdmin.auth.admin.deleteUser(userId)
+      return NextResponse.json({ success: true, message: 'User deleted' })
+    }
+
+    // ── Reset password ──
+    if (action === 'reset_password') {
+      const { createClient } = require('@supabase/supabase-js')
+      const browserClient = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+      )
+      await browserClient.auth.resetPasswordForEmail(email, {
+        redirectTo: `${process.env.NEXT_PUBLIC_APP_URL}/reset-password`
+      })
+      return NextResponse.json({ success: true, message: 'Password reset email sent' })
+    }
+
+    // ── Manual upgrade ──
+    if (action === 'upgrade') {
+      await supabaseAdmin.from('users')
+        .update({ plan: 'monthly' })
+        .eq('id', userId)
+      return NextResponse.json({ success: true, message: 'User upgraded to Pro' })
+    }
+
+    // ── Cancel subscription ──
     if (action === 'cancel') {
       if (subscriptionId) {
         await stripe.subscriptions.cancel(subscriptionId)
@@ -55,17 +87,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, message: 'Subscription cancelled' })
     }
 
+    // ── Refund ──
     if (action === 'refund') {
       if (subscriptionId) {
         const sub = await stripe.subscriptions.retrieve(subscriptionId)
-        const latestInvoiceId = sub.latest_invoice as string
+        const latestInvoiceId = sub.latest_invoice
         if (latestInvoiceId) {
           const invoice = await stripe.invoices.retrieve(latestInvoiceId)
-          const paymentIntent = (invoice as any).payment_intent
+          const paymentIntent = invoice.payment_intent
           if (paymentIntent) {
-            await stripe.refunds.create({
-              payment_intent: paymentIntent as string
-            })
+            await stripe.refunds.create({ payment_intent: paymentIntent })
           }
         }
         await stripe.subscriptions.cancel(subscriptionId)
