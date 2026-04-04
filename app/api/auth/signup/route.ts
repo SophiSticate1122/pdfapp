@@ -1,10 +1,7 @@
-import { createClient } from '@supabase/supabase-js'
-import { NextRequest, NextResponse } from 'next/server'
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
+import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(req: NextRequest) {
   try {
@@ -14,40 +11,55 @@ export async function POST(req: NextRequest) {
     if (!name || !email || !password)
       return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
 
-    // First check if user already exists in our users table
+    const { createClient } = require('@supabase/supabase-js')
+
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    )
+
+    // Check if email already exists in users table
     const { data: existing } = await supabaseAdmin
       .from('users')
-      .select('*')
-      .eq('email', email.toLowerCase())
+      .select('id, email')
+      .eq('email', email.toLowerCase().trim())
       .single()
 
     if (existing) {
       return NextResponse.json({
-        user: {
-          id: existing.id,
-          name: existing.name,
-          email: existing.email,
-          plan: existing.plan,
-          pdf_used: existing.pdf_used
-        }
-      })
+        error: 'An account with this email already exists. Please log in instead.'
+      }, { status: 400 })
     }
 
-    // Create auth user
+    // Also check Supabase Auth
+    const { data: authList } = await supabaseAdmin.auth.admin.listUsers()
+    const authExists = authList?.users?.find(
+      (u: any) => u.email?.toLowerCase() === email.toLowerCase().trim()
+    )
+
+    if (authExists) {
+      return NextResponse.json({
+        error: 'An account with this email already exists. Please log in instead.'
+      }, { status: 400 })
+    }
+
+    // Create new auth user
     const { data, error } = await supabaseAdmin.auth.admin.createUser({
-      email,
+      email: email.toLowerCase().trim(),
       password,
       user_metadata: { name },
       email_confirm: true
     })
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 400 })
+    }
 
-    // Also manually insert into users table as backup
+    // Insert into users table
     await supabaseAdmin.from('users').upsert({
       id: data.user.id,
-      name,
-      email: email.toLowerCase(),
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
       plan: 'free',
       pdf_used: 0,
       created_at: new Date().toISOString()
@@ -56,8 +68,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       user: {
         id: data.user.id,
-        name,
-        email,
+        name: name.trim(),
+        email: email.toLowerCase().trim(),
         plan: 'free',
         pdf_used: 0
       }

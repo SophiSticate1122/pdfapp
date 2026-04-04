@@ -1,10 +1,7 @@
-import { createClient } from '@supabase/supabase-js'
-import { NextRequest, NextResponse } from 'next/server'
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
+import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(req: NextRequest) {
   try {
@@ -14,21 +11,30 @@ export async function POST(req: NextRequest) {
     if (!email || !password)
       return NextResponse.json({ error: 'Missing email or password' }, { status: 400 })
 
-    // Sign in via Supabase Auth
-    const { createClient: createBrowserClient } = await import('@supabase/supabase-js')
-    const browserClient = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    const { createClient } = require('@supabase/supabase-js')
+
+    // Use anon client for login
+    const browserClient = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     )
 
     const { data: authData, error: authError } = await browserClient.auth.signInWithPassword({
-      email,
+      email: email.toLowerCase().trim(),
       password
     })
 
-    if (authError) return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 })
+    if (authError) {
+      console.error('Login error:', authError)
+      return NextResponse.json({ error: 'Invalid email or password. Please try again.' }, { status: 401 })
+    }
 
     // Get profile from users table
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    )
+
     const { data: profile } = await supabaseAdmin
       .from('users')
       .select('*')
@@ -45,6 +51,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ user })
   } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    console.error('Login catch error:', e)
+    return NextResponse.json({ error: e.message || 'Login failed' }, { status: 500 })
   }
 }
