@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
       ? process.env.STRIPE_MONTHLY_PRICE_ID
       : process.env.STRIPE_YEARLY_PRICE_ID
 
-    const appUrl = 'https://pdfsummarizer.store'
+    const appUrl = 'https://www.pdfsummarizer.store'
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',

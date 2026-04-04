@@ -21,7 +21,7 @@ async function extractText(file: File): Promise<string> {
       try {
         const pdfjsLib = (window as any)['pdfjs-dist/build/pdf']
         pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
         const pdf = await pdfjsLib.getDocument({ data: e.target!.result }).promise
         let text = ''
         for (let i = 1; i <= pdf.numPages; i++) {
@@ -179,9 +179,14 @@ function PaywallModal({ user, onClose }: { user: AppUser; onClose: () => void })
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plan, userId: user.id, email: user.email })
       })
-      const { url } = await res.json()
-      window.location.href = url
-    } catch { setLoading(false) }
+      const data = await res.json()
+      console.log('Subscribe response:', data)
+      if (!data.url) throw new Error(data.error || 'No checkout URL returned. Please try again.')
+      window.location.href = data.url
+    } catch (e: any) {
+      alert('Payment error: ' + e.message)
+      setLoading(false)
+    }
   }
 
   return (
@@ -496,7 +501,6 @@ export default function App() {
       if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
       setPdfText(text)
 
-      // Split into chunks of 15,000 characters each
       const CHUNK_SIZE = 15000
       const chunks: string[] = []
       for (let i = 0; i < text.length; i += CHUNK_SIZE) {
@@ -505,10 +509,8 @@ export default function App() {
 
       setStatus(`🤖 Summarizing ${chunks.length} sections in parallel...`)
 
-      // Track results per chunk so order is preserved
       const results: string[] = new Array(chunks.length).fill('')
 
-      // Process all chunks simultaneously
       await Promise.all(
         chunks.map(async (chunk, i) => {
           const res = await fetch('/api/summarize', {
@@ -537,14 +539,11 @@ export default function App() {
             throw new Error(data.error)
           }
 
-          // Store result in correct position
           results[i] = data.summary
 
-          // Show progress — count how many are done
           const done = results.filter(r => r !== '').length
           setStatus(`🤖 ${done} of ${chunks.length} sections complete...`)
 
-          // Update summary with whatever is done so far in correct order
           setSummary(results.join('\n\n').trim())
         })
       )
