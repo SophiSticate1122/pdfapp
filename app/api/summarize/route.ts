@@ -13,6 +13,25 @@ function getSupabaseAdmin() {
   )
 }
 
+async function callClaudeWithRetry(anthropic: Anthropic, params: any, retries = 5): Promise<any> {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await anthropic.messages.create(params)
+    } catch (e: any) {
+      const isRateLimit = e?.status === 429 || e?.message?.includes('rate limit')
+      const isOverload = e?.status === 529 || e?.message?.includes('overloaded')
+
+      if ((isRateLimit || isOverload) && attempt < retries - 1) {
+        const waitTime = (attempt + 1) * 3000 // 3s, 6s, 9s, 12s
+        console.log(`Rate limited or overloaded. Retrying in ${waitTime}ms (attempt ${attempt + 1} of ${retries})...`)
+        await new Promise(r => setTimeout(r, waitTime))
+        continue
+      }
+      throw e
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -61,7 +80,7 @@ IMPORTANT RULES:
 DOCUMENT SECTION ${chunkIndex + 1} OF ${totalChunks}:
 ${text}`
 
-    const message = await anthropic.messages.create({
+    const message = await callClaudeWithRetry(anthropic, {
       model: 'claude-sonnet-4-20250514',
       max_tokens: 8000,
       messages: [{ role: 'user', content: prompt }]
@@ -75,6 +94,20 @@ ${text}`
     return NextResponse.json({ summary, chunkIndex })
   } catch (e: any) {
     console.error('Summarize error:', e)
+
+    // Return friendly error messages
+    if (e?.status === 429) {
+      return NextResponse.json({
+        error: 'Our AI is currently busy due to high demand. Please try again in a few seconds.'
+      }, { status: 429 })
+    }
+
+    if (e?.status === 529) {
+      return NextResponse.json({
+        error: 'Our AI service is temporarily overloaded. Please try again in a moment.'
+      }, { status: 529 })
+    }
+
     return NextResponse.json({ error: e.message }, { status: 500 })
   }
 }
