@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { Upload, MessageSquare, FileText, Loader2, Crown, Send, X, User, Mail, ChevronRight, Check, Shield } from 'lucide-react'
+import { Upload, MessageSquare, FileText, Loader2, Crown, Send, X, User, Mail, ChevronRight, Check, Shield, LogOut } from 'lucide-react'
 
 function usePdfJs() {
   const [ready, setReady] = useState(false)
@@ -21,7 +21,7 @@ async function extractText(file: File): Promise<string> {
       try {
         const pdfjsLib = (window as any)['pdfjs-dist/build/pdf']
         pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
         const pdf = await pdfjsLib.getDocument({ data: e.target!.result }).promise
         let text = ''
         for (let i = 1; i <= pdf.numPages; i++) {
@@ -40,6 +40,21 @@ async function extractText(file: File): Promise<string> {
 
 interface AppUser { id: string; name: string; email: string; plan: string; pdf_used: number }
 interface Message { role: string; text: string }
+
+function saveUser(u: AppUser) {
+  try { localStorage.setItem('pdf_user', JSON.stringify(u)) } catch {}
+}
+
+function loadUser(): AppUser | null {
+  try {
+    const saved = localStorage.getItem('pdf_user')
+    return saved ? JSON.parse(saved) : null
+  } catch { return null }
+}
+
+function clearUser() {
+  try { localStorage.removeItem('pdf_user') } catch {}
+}
 
 function Modal({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
   return (
@@ -79,6 +94,7 @@ function SignupModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: (
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
+      saveUser(data.user)
       onSuccess(data.user)
     } catch (e: any) { setErr(e.message) }
     setLoading(false)
@@ -96,6 +112,7 @@ function SignupModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: (
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
+      saveUser(data.user)
       onSuccess(data.user)
     } catch (e: any) { setErr(e.message) }
     setLoading(false)
@@ -180,7 +197,6 @@ function PaywallModal({ user, onClose }: { user: AppUser; onClose: () => void })
         body: JSON.stringify({ plan, userId: user.id, email: user.email })
       })
       const data = await res.json()
-      console.log('Subscribe response:', data)
       if (!data.url) throw new Error(data.error || 'No checkout URL returned. Please try again.')
       window.location.href = data.url
     } catch (e: any) {
@@ -472,16 +488,51 @@ export default function App() {
   const [modal, setModal] = useState<string | null>(null)
 
   useEffect(() => {
+    // Load user from localStorage on page load
+    const saved = loadUser()
+    if (saved) setUser(saved)
+
+    // Handle Stripe success redirect
     const params = new URLSearchParams(window.location.search)
     if (params.get('success') === 'true') {
-      alert('🎉 Payment successful! Your Pro plan is now active.')
       window.history.replaceState({}, '', '/')
+      const savedUser = loadUser()
+      if (savedUser) {
+        // Refresh user plan from database
+        fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: savedUser.id })
+        })
+          .then(r => r.json())
+          .then(data => {
+            if (data.user) {
+              setUser(data.user)
+              saveUser(data.user)
+              alert('🎉 Payment successful! Your Pro plan is now active.')
+            }
+          })
+          .catch(() => {
+            alert('🎉 Payment successful! Your Pro plan is now active.')
+          })
+      } else {
+        alert('🎉 Payment successful! Please log in to access Pro features.')
+      }
     }
   }, [])
 
   const isPro = user?.plan === 'monthly' || user?.plan === 'yearly'
   const hasUsed = (user?.pdf_used || 0) >= 1
   const canUpload = user && (isPro || !hasUsed)
+
+  const handleLogout = () => {
+    clearUser()
+    setUser(null)
+    setSummary('')
+    setMessages([])
+    setPdfFile(null)
+    setPdfText('')
+  }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -508,7 +559,6 @@ export default function App() {
       }
 
       setStatus(`🤖 Summarizing ${chunks.length} sections in parallel...`)
-
       const results: string[] = new Array(chunks.length).fill('')
 
       await Promise.all(
@@ -540,15 +590,18 @@ export default function App() {
           }
 
           results[i] = data.summary
-
           const done = results.filter(r => r !== '').length
           setStatus(`🤖 ${done} of ${chunks.length} sections complete...`)
-
           setSummary(results.join('\n\n').trim())
         })
       )
 
-      setUser(prev => prev ? { ...prev, pdf_used: (prev.pdf_used || 0) + 1 } : prev)
+      setUser(prev => {
+        if (!prev) return prev
+        const updated = { ...prev, pdf_used: (prev.pdf_used || 0) + 1 }
+        saveUser(updated)
+        return updated
+      })
     } catch (e: any) {
       alert('Error: ' + e.message)
     } finally {
@@ -618,6 +671,10 @@ export default function App() {
                           Upgrade
                         </button>
                     }
+                    <button onClick={handleLogout}
+                      className="text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-2 py-1.5 rounded-full transition flex items-center gap-1">
+                      <LogOut className="w-3 h-3" /> Log Out
+                    </button>
                   </div>
                 ) : (
                   <button onClick={() => setModal('signup')}
