@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
-export const maxDuration = 300 // 5 minutes
+export const maxDuration = 300
 
 import Anthropic from '@anthropic-ai/sdk'
 import { NextRequest, NextResponse } from 'next/server'
@@ -17,34 +17,27 @@ export async function POST(req: NextRequest) {
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
     const supabaseAdmin = getSupabaseAdmin()
-    const { userId, text, instructions } = await req.json()
+    const { userId, text, instructions, chunkIndex, totalChunks, isFirst } = await req.json()
 
     if (!userId || !text)
       return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
 
-    const { data: user } = await supabaseAdmin
-      .from('users').select('*').eq('id', userId).single()
+    // Only check/update usage on the first chunk
+    if (isFirst) {
+      const { data: user } = await supabaseAdmin
+        .from('users').select('*').eq('id', userId).single()
 
-    if (!user)
-      return NextResponse.json({ error: 'User not found' }, { status: 401 })
-    if (user.plan === 'free' && user.pdf_used >= 1)
-      return NextResponse.json({ error: 'upgrade_required' }, { status: 403 })
+      if (!user)
+        return NextResponse.json({ error: 'User not found' }, { status: 401 })
+      if (user.plan === 'free' && user.pdf_used >= 1)
+        return NextResponse.json({ error: 'upgrade_required' }, { status: 403 })
 
-    // Split text into chunks of 40,000 characters each
-    const CHUNK_SIZE = 40000
-    const chunks: string[] = []
-    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-      chunks.push(text.slice(i, i + CHUNK_SIZE))
+      await supabaseAdmin.from('users')
+        .update({ pdf_used: (user.pdf_used || 0) + 1 })
+        .eq('id', userId)
     }
 
-    let fullSummary = ''
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]
-      const isFirst = i === 0
-      const isLast = i === chunks.length - 1
-
-      const prompt = `You are an expert document analyst and educator. Analyze the following section of a document (part ${i + 1} of ${chunks.length}).
+    const prompt = `You are an expert document analyst and educator. Analyze the following section of a document (part ${chunkIndex + 1} of ${totalChunks}).
 ${instructions ? `Special instructions: ${instructions}\n` : ''}
 
 For EACH PAGE in this section, provide a structured summary using EXACTLY this format:
@@ -65,29 +58,21 @@ IMPORTANT RULES:
 - Be thorough and educational — write for someone who has never read this document
 - Only use information from the document — do not add outside information
 
-DOCUMENT SECTION ${i + 1} OF ${chunks.length}:
-${chunk}`
+DOCUMENT SECTION ${chunkIndex + 1} OF ${totalChunks}:
+${text}`
 
-      const message = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 8000,
-        messages: [{ role: 'user', content: prompt }]
-      })
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 8000,
+      messages: [{ role: 'user', content: prompt }]
+    })
 
-      const chunkSummary = message.content
-        .filter((b: any) => b.type === 'text')
-        .map((b: any) => b.text)
-        .join('\n')
+    const summary = message.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n')
 
-      fullSummary += (isFirst ? '' : '\n\n') + chunkSummary
-    }
-
-    // Update pdf_used count
-    await supabaseAdmin.from('users')
-      .update({ pdf_used: (user.pdf_used || 0) + 1 })
-      .eq('id', userId)
-
-    return NextResponse.json({ summary: fullSummary })
+    return NextResponse.json({ summary, chunkIndex })
   } catch (e: any) {
     console.error('Summarize error:', e)
     return NextResponse.json({ error: e.message }, { status: 500 })

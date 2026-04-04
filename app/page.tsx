@@ -495,27 +495,51 @@ export default function App() {
       const text = await extractText(pdfFile)
       if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
       setPdfText(text)
-      setStatus('🤖 Generating summary...')
-      const res = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, text, instructions })
-      })
 
-      // Handle non-JSON responses gracefully
-      const rawText = await res.text()
-      let data: any = {}
-      try {
-        data = JSON.parse(rawText)
-      } catch {
-        throw new Error('The request timed out. Your document may be too large. Please try a smaller PDF or split it into sections.')
+      // Split into chunks of 15,000 characters each
+      const CHUNK_SIZE = 15000
+      const chunks: string[] = []
+      for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        chunks.push(text.slice(i, i + CHUNK_SIZE))
       }
 
-      if (!res.ok) {
-        if (data.error === 'upgrade_required') { setModal('paywall'); return }
-        throw new Error(data.error)
+      let fullSummary = ''
+
+      for (let i = 0; i < chunks.length; i++) {
+        setStatus(`🤖 Summarizing section ${i + 1} of ${chunks.length}...`)
+
+        const res = await fetch('/api/summarize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user.id,
+            text: chunks[i],
+            instructions,
+            chunkIndex: i,
+            totalChunks: chunks.length,
+            isFirst: i === 0
+          })
+        })
+
+        const rawText = await res.text()
+        let data: any = {}
+        try {
+          data = JSON.parse(rawText)
+        } catch {
+          throw new Error(`Section ${i + 1} timed out. Please try again.`)
+        }
+
+        if (!res.ok) {
+          if (data.error === 'upgrade_required') { setModal('paywall'); return }
+          throw new Error(data.error)
+        }
+
+        fullSummary += (i === 0 ? '' : '\n\n') + data.summary
+
+        // Show partial results as they come in
+        setSummary(fullSummary)
       }
-      setSummary(data.summary)
+
       setUser(prev => prev ? { ...prev, pdf_used: (prev.pdf_used || 0) + 1 } : prev)
     } catch (e: any) {
       alert('Error: ' + e.message)
@@ -630,6 +654,7 @@ export default function App() {
             <div className="p-6 border-b bg-gray-50">
               <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
                 <FileText className="w-5 h-5 text-blue-600" /> Summary
+                {loading && <span className="text-xs text-blue-500 font-normal">{status}</span>}
               </h2>
               <div className="bg-white p-4 rounded-lg border border-gray-200 max-h-96 overflow-y-auto">
                 <p className="text-gray-700 whitespace-pre-wrap text-sm leading-relaxed">{summary}</p>
@@ -637,7 +662,7 @@ export default function App() {
             </div>
           )}
 
-          {summary && (
+          {summary && !loading && (
             <div className="p-6">
               <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
                 <MessageSquare className="w-5 h-5 text-blue-600" /> Ask Questions
