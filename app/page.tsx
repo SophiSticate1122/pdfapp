@@ -503,42 +503,51 @@ export default function App() {
         chunks.push(text.slice(i, i + CHUNK_SIZE))
       }
 
-      let fullSummary = ''
+      setStatus(`🤖 Summarizing ${chunks.length} sections in parallel...`)
 
-      for (let i = 0; i < chunks.length; i++) {
-        setStatus(`🤖 Summarizing section ${i + 1} of ${chunks.length}...`)
+      // Track results per chunk so order is preserved
+      const results: string[] = new Array(chunks.length).fill('')
 
-        const res = await fetch('/api/summarize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: user.id,
-            text: chunks[i],
-            instructions,
-            chunkIndex: i,
-            totalChunks: chunks.length,
-            isFirst: i === 0
+      // Process all chunks simultaneously
+      await Promise.all(
+        chunks.map(async (chunk, i) => {
+          const res = await fetch('/api/summarize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: user.id,
+              text: chunk,
+              instructions,
+              chunkIndex: i,
+              totalChunks: chunks.length,
+              isFirst: i === 0
+            })
           })
+
+          const rawText = await res.text()
+          let data: any = {}
+          try {
+            data = JSON.parse(rawText)
+          } catch {
+            throw new Error(`Section ${i + 1} timed out. Please try again.`)
+          }
+
+          if (!res.ok) {
+            if (data.error === 'upgrade_required') { setModal('paywall'); return }
+            throw new Error(data.error)
+          }
+
+          // Store result in correct position
+          results[i] = data.summary
+
+          // Show progress — count how many are done
+          const done = results.filter(r => r !== '').length
+          setStatus(`🤖 ${done} of ${chunks.length} sections complete...`)
+
+          // Update summary with whatever is done so far in correct order
+          setSummary(results.join('\n\n').trim())
         })
-
-        const rawText = await res.text()
-        let data: any = {}
-        try {
-          data = JSON.parse(rawText)
-        } catch {
-          throw new Error(`Section ${i + 1} timed out. Please try again.`)
-        }
-
-        if (!res.ok) {
-          if (data.error === 'upgrade_required') { setModal('paywall'); return }
-          throw new Error(data.error)
-        }
-
-        fullSummary += (i === 0 ? '' : '\n\n') + data.summary
-
-        // Show partial results as they come in
-        setSummary(fullSummary)
-      }
+      )
 
       setUser(prev => prev ? { ...prev, pdf_used: (prev.pdf_used || 0) + 1 } : prev)
     } catch (e: any) {
@@ -581,6 +590,8 @@ export default function App() {
 
       <div className="max-w-4xl mx-auto">
         <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
+
+          {/* Header */}
           <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -619,6 +630,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* Upload */}
           <div className="p-6 border-b">
             <label
               className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-xl transition-colors
@@ -650,11 +662,12 @@ export default function App() {
             )}
           </div>
 
+          {/* Summary */}
           {summary && (
             <div className="p-6 border-b bg-gray-50">
               <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
                 <FileText className="w-5 h-5 text-blue-600" /> Summary
-                {loading && <span className="text-xs text-blue-500 font-normal">{status}</span>}
+                {loading && <span className="text-xs text-blue-500 font-normal animate-pulse">{status}</span>}
               </h2>
               <div className="bg-white p-4 rounded-lg border border-gray-200 max-h-96 overflow-y-auto">
                 <p className="text-gray-700 whitespace-pre-wrap text-sm leading-relaxed">{summary}</p>
@@ -662,6 +675,7 @@ export default function App() {
             </div>
           )}
 
+          {/* Q&A */}
           {summary && !loading && (
             <div className="p-6">
               <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
@@ -690,6 +704,7 @@ export default function App() {
               </div>
             </div>
           )}
+
         </div>
       </div>
     </div>
