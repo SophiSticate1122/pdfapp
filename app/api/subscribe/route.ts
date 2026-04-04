@@ -1,15 +1,19 @@
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
+
 import Stripe from 'stripe'
 import { NextRequest, NextResponse } from 'next/server'
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
-
 export async function POST(req: NextRequest) {
   try {
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
     const { plan, userId, email } = await req.json()
 
     const priceId = plan === 'monthly'
       ? process.env.STRIPE_MONTHLY_PRICE_ID
       : process.env.STRIPE_YEARLY_PRICE_ID
+
+    const appUrl = 'https://pdfsummarizer.store'
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
@@ -17,8 +21,8 @@ export async function POST(req: NextRequest) {
       customer_email: email,
       line_items: [{ price: priceId!, quantity: 1 }],
       metadata: { userId },
-      success_url: `${process.env.NEXT_PUBLIC_APP_URL}?success=true`,
-      cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}?cancelled=true`,
+      success_url: `${appUrl}?success=true`,
+      cancel_url: `${appUrl}?cancelled=true`,
     })
 
     return NextResponse.json({ url: session.url })
