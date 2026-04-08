@@ -13,16 +13,17 @@ function getSupabaseAdmin() {
   )
 }
 
-async function callClaudeWithRetry(anthropic: Anthropic, params: any, retries = 5): Promise<any> {
+async function callClaudeWithRetry(anthropic: Anthropic, params: any, retries = 8): Promise<any> {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       return await anthropic.messages.create(params)
     } catch (e: any) {
       const isRateLimit = e?.status === 429 || e?.message?.includes('rate limit')
       const isOverload = e?.status === 529 || e?.message?.includes('overloaded')
-      if ((isRateLimit || isOverload) && attempt < retries - 1) {
-        const waitTime = (attempt + 1) * 5000
-        console.log(`Rate limited. Waiting ${waitTime}ms before retry ${attempt + 1}...`)
+      const isTimeout = e?.message?.includes('timeout') || e?.message?.includes('timed out')
+      if ((isRateLimit || isOverload || isTimeout) && attempt < retries - 1) {
+        const waitTime = (attempt + 1) * 4000
+        console.log(`Retrying in ${waitTime}ms (attempt ${attempt + 1})...`)
         await new Promise(r => setTimeout(r, waitTime))
         continue
       }
@@ -52,32 +53,28 @@ export async function POST(req: NextRequest) {
         .eq('id', userId)
     }
 
-    const prompt = `You are an expert document analyst and educator. Analyze the following section of a document (part ${chunkIndex + 1} of ${totalChunks}).
-${instructions ? `Special instructions: ${instructions}\n` : ''}
-For EACH PAGE in this section, provide a structured summary using EXACTLY this format:
+    // Shorter, faster prompt — quality maintained but concise
+    const prompt = `You are an expert document analyst. Analyze this document section (part ${chunkIndex + 1} of ${totalChunks}).
+${instructions ? `Instructions: ${instructions}\n` : ''}
+For EACH PAGE provide this exact format:
 
 Page X
 -------
-**People:** List all key people, authors, or groups mentioned and their significance.
-**Core Concepts:** List and briefly explain the main ideas introduced on this page.
-**Arguments:** Write a thorough, educational explanation (~250 words) of the main arguments made. Explain the reasoning, provide context, give examples, and make sure someone with no prior knowledge would fully understand what is being argued and why it matters.
-**Methods:** Describe any research methods, data, or evidence used (write "Not applicable" if none).
-**Implications:** Explain why this matters, what consequences or applications follow from the content.
-**Critiques:** Identify any weaknesses, assumptions, gaps, counterarguments, or limitations.
+**People:** Key people and their roles.
+**Core Concepts:** Main ideas (2-3 sentences each).
+**Arguments:** Thorough explanation (~200 words) — explain reasoning, context, examples so anyone can understand.
+**Methods:** Research methods or evidence used (or "Not applicable").
+**Implications:** Why this matters and what follows from it.
+**Critiques:** Weaknesses, assumptions, gaps, or counterarguments.
 
-IMPORTANT RULES:
-- Cover EVERY single page in this section
-- Each page summary should be at least 250 words total
-- The Arguments section alone should be at least 150 words
-- Be thorough and educational
-- Only use information from the document
+Cover every page. Be educational and thorough.
 
-DOCUMENT SECTION ${chunkIndex + 1} OF ${totalChunks}:
+DOCUMENT SECTION ${chunkIndex + 1}/${totalChunks}:
 ${text}`
 
     const message = await callClaudeWithRetry(anthropic, {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000,
+      max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
     })
 
@@ -89,11 +86,14 @@ ${text}`
     return NextResponse.json({ summary, chunkIndex })
   } catch (e: any) {
     console.error('Summarize error:', e)
+    if (e?.message?.includes('credit') || e?.message?.includes('billing')) {
+      return NextResponse.json({ error: 'insufficient_credits', message: 'API credits exhausted. Please contact support.' }, { status: 402 })
+    }
     if (e?.status === 429) {
-      return NextResponse.json({ error: 'rate_limited', message: 'AI is busy. Retrying automatically.' }, { status: 429 })
+      return NextResponse.json({ error: 'rate_limited' }, { status: 429 })
     }
     if (e?.status === 529) {
-      return NextResponse.json({ error: 'overloaded', message: 'AI overloaded. Retrying automatically.' }, { status: 529 })
+      return NextResponse.json({ error: 'overloaded' }, { status: 529 })
     }
     return NextResponse.json({ error: e.message }, { status: 500 })
   }
