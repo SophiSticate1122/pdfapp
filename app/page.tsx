@@ -532,17 +532,28 @@ export default function App() {
 
   const handleExportWord = () => exportToWord(summary, pdfFile?.name || 'document')
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; e.target.value = ''
-    if (!file || file.type !== 'application/pdf') { alert('Please upload a PDF file.'); return }
-    if (!user) { setModal('signup'); return }
-    if (!canUpload) {
-      setPaywallMessage("You've used your 1 free summary. Upgrade to Pro for unlimited summaries.")
-      setModal('paywall'); return
-    }
-    setPdfFile(file); setSummary(''); setMessages([]); setPdfText(''); setPageCount(0)
-    setProgress({ completed: 0, total: 0 })
+const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0]; e.target.value = ''
+  if (!file || file.type !== 'application/pdf') { alert('Please upload a PDF file.'); return }
+  if (!user) { setModal('signup'); return }
+  if (!canUpload) {
+    setPaywallMessage("You've used your 1 free summary. Upgrade to Pro for unlimited summaries.")
+    setModal('paywall'); return
   }
+  setPdfFile(file); setSummary(''); setMessages([]); setPdfText(''); setPageCount(0)
+  setProgress({ completed: 0, total: 0 })
+
+  // Extract text immediately so Q&A is available right away
+  if (pdfJsReady) {
+    setStatus('📄 Reading PDF...')
+    try {
+      const { text, pageCount: pages } = await extractTextWithPageCount(file)
+      setPdfText(text)
+      setPageCount(pages)
+      setStatus('')
+    } catch { setStatus('') }
+  }
+}
 
 const handleSummarize = async () => {
   if (!pdfFile || !user) return
@@ -814,10 +825,11 @@ const handleSummarize = async () => {
           )}
 
           {/* Q&A */}
-          {summary && !loading && (
+          {pdfText && !loading && (
             <div className="p-6">
               <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
                 <MessageSquare className="w-5 h-5 text-blue-600" /> Ask Questions
+                <span className="text-xs font-normal text-gray-400">— ask anything about this document</span>
               </h2>
               <div className="space-y-3 mb-4 max-h-80 overflow-y-auto">
                 {messages.map((m, i) => (
