@@ -234,12 +234,7 @@ function PaywallModal({ user, onClose, message }: { user: AppUser; onClose: () =
           ))}
         </div>
         <ul className="text-sm text-gray-600 space-y-2 mb-5">
-          {[
-            'Up to 150 pages per document',
-            'Unlimited PDF summaries',
-            'Full Q&A on every document',
-            'Priority processing'
-          ].map(f => (
+          {['Up to 150 pages per document', 'Unlimited PDF summaries', 'Full Q&A on every document', 'Priority processing'].map(f => (
             <li key={f} className="flex items-center gap-2"><Check className="w-4 h-4 text-green-500 flex-shrink-0" />{f}</li>
           ))}
         </ul>
@@ -478,7 +473,6 @@ export default function App() {
       const { text, pageCount: pages } = await extractTextWithPageCount(pdfFile)
       setPageCount(pages)
 
-      // Check page limits
       if (!isPro && pages > MAX_PAGES_FREE) {
         setLoading(false); setStatus('')
         setPaywallMessage(`This document has ${pages} pages. Free plan supports up to ${MAX_PAGES_FREE} pages. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`)
@@ -487,20 +481,18 @@ export default function App() {
 
       if (isPro && pages > MAX_PAGES_PRO) {
         setLoading(false); setStatus('')
-        alert(`This document has ${pages} pages. Our current limit is ${MAX_PAGES_PRO} pages per document. Please split your document into smaller sections.`)
+        alert(`This document has ${pages} pages. Our current limit is ${MAX_PAGES_PRO} pages. Please split your document into smaller sections.`)
         return
       }
 
       if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
       setPdfText(text)
 
-      // Warn for large documents
       if (pages > 50) {
         setStatus(`⚠️ Large document (${pages} pages) — results will appear progressively...`)
         await new Promise(r => setTimeout(r, 1500))
       }
 
-      // Larger chunks = fewer API calls = faster
       const CHUNK_SIZE = 25000
       const chunks: string[] = []
       for (let i = 0; i < text.length; i += CHUNK_SIZE) {
@@ -511,72 +503,99 @@ export default function App() {
       const results: string[] = new Array(totalChunks).fill('')
       let completed = 0
 
-      setStatus(`🤖 Summarizing ${pages} pages in ${totalChunks} sections...`)
+      setStatus(`🤖 Summarizing ${pages} pages across ${totalChunks} sections...`)
 
-      const processChunk = async (chunk: string, i: number, retryCount = 0): Promise<void> => {
-        try {
-          const res = await fetch('/api/summarize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: user.id,
-              text: chunk,
-              instructions,
-              chunkIndex: i,
-              totalChunks,
-              isFirst: i === 0
+      const processChunkWithRetry = async (chunk: string, i: number): Promise<void> => {
+        const maxRetries = 6
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          try {
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => controller.abort(), 55000)
+
+            const res = await fetch('/api/summarize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                userId: user.id,
+                text: chunk,
+                instructions,
+                chunkIndex: i,
+                totalChunks,
+                isFirst: i === 0
+              }),
+              signal: controller.signal
             })
-          })
-          const rawText = await res.text()
-          let data: any = {}
-          try { data = JSON.parse(rawText) } catch {
-            throw new Error(`Section ${i + 1} failed. Retrying...`)
-          }
+            clearTimeout(timeoutId)
 
-          if (res.status === 429 || res.status === 529 || data.error === 'rate_limited' || data.error === 'overloaded') {
-            if (retryCount < 5) {
-              const waitTime = (retryCount + 1) * 8000
-              setStatus(`⏳ AI busy — retrying section ${i + 1} in ${Math.round(waitTime / 1000)}s...`)
-              await new Promise(r => setTimeout(r, waitTime))
-              return processChunk(chunk, i, retryCount + 1)
+            const rawText = await res.text()
+            let data: any = {}
+            try { data = JSON.parse(rawText) } catch {
+              if (attempt < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, (attempt + 1) * 3000))
+                continue
+              }
+              throw new Error(`Section ${i + 1} failed to parse.`)
             }
-            throw new Error(`Section ${i + 1} failed after retries. Please try again.`)
-          }
 
-          if (!res.ok) {
-            if (data.error === 'upgrade_required') { setModal('paywall'); return }
-            throw new Error(data.error)
-          }
+            if (res.status === 429 || res.status === 529 || data.error === 'rate_limited' || data.error === 'overloaded') {
+              const waitTime = (attempt + 1) * 8000
+              setStatus(`⏳ AI busy — waiting ${Math.round(waitTime / 1000)}s before retrying section ${i + 1}... (${completed}/${totalChunks} done)`)
+              await new Promise(r => setTimeout(r, waitTime))
+              continue
+            }
 
-          results[i] = data.summary
-          completed++
-          setStatus(`🤖 ${completed} of ${totalChunks} sections complete...`)
-          setSummary(results.join('\n\n').trim())
-        } catch (e: any) {
-          if (retryCount < 3) {
-            await new Promise(r => setTimeout(r, (retryCount + 1) * 5000))
-            return processChunk(chunk, i, retryCount + 1)
+            if (!res.ok) {
+              if (data.error === 'upgrade_required') { setModal('paywall'); return }
+              if (attempt < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, (attempt + 1) * 3000))
+                continue
+              }
+              throw new Error(data.error)
+            }
+
+            results[i] = data.summary
+            completed++
+            setStatus(`🤖 ${completed} of ${totalChunks} sections complete...`)
+            setSummary(results.filter(r => r !== '').length > 0 ? results.join('\n\n').trim() : '')
+            return
+
+          } catch (e: any) {
+            if (e.name === 'AbortError') {
+              if (attempt < maxRetries - 1) {
+                setStatus(`⏳ Section ${i + 1} timed out — retrying... (attempt ${attempt + 2}/${maxRetries})`)
+                await new Promise(r => setTimeout(r, (attempt + 1) * 4000))
+                continue
+              }
+            }
+            if (attempt < maxRetries - 1) {
+              await new Promise(r => setTimeout(r, (attempt + 1) * 3000))
+              continue
+            }
+            throw new Error(`Section ${i + 1} failed after ${maxRetries} attempts: ${e.message}`)
           }
-          throw e
         }
       }
 
-      // Process in batches of 5 for speed + rate limit balance
-      const BATCH_SIZE = 5
+      const BATCH_SIZE = 3
       for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
         const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length)
-        const batch = chunks.slice(batchStart, batchEnd)
-        await Promise.all(batch.map((chunk, batchIndex) => processChunk(chunk, batchStart + batchIndex)))
+        const batchChunks = chunks.slice(batchStart, batchEnd)
+        setStatus(`🤖 Processing sections ${batchStart + 1}–${batchEnd} of ${totalChunks}...`)
+        await Promise.all(
+          batchChunks.map((chunk, idx) => processChunkWithRetry(chunk, batchStart + idx))
+        )
         if (batchEnd < chunks.length) {
-          await new Promise(r => setTimeout(r, 1000))
+          await new Promise(r => setTimeout(r, 1500))
         }
       }
 
+      setSummary(results.join('\n\n').trim())
       setUser(prev => {
         if (!prev) return prev
         const updated = { ...prev, pdf_used: (prev.pdf_used || 0) + 1 }
         saveUser(updated); return updated
       })
+
     } catch (e: any) {
       alert('Error: ' + e.message)
     } finally {
@@ -654,13 +673,11 @@ export default function App() {
 
           {/* Upload */}
           <div className="p-6 border-b">
-
-            {/* Page limit info banner */}
             {user && (
               <div className={`mb-4 px-4 py-3 rounded-xl text-sm flex items-center gap-2 ${isPro ? 'bg-blue-50 text-blue-700' : 'bg-yellow-50 text-yellow-700'}`}>
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 {isPro
-                  ? `Pro plan: up to ${MAX_PAGES_PRO} pages per document. Results appear in under 2 minutes.`
+                  ? `Pro plan: up to ${MAX_PAGES_PRO} pages per document. Results appear progressively.`
                   : `Free plan: up to ${MAX_PAGES_FREE} pages per document. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`}
               </div>
             )}
@@ -733,6 +750,7 @@ export default function App() {
               </div>
             </div>
           )}
+
         </div>
       </div>
     </div>
