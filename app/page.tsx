@@ -1,6 +1,9 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { Upload, MessageSquare, FileText, Loader2, Crown, Send, X, User, Mail, ChevronRight, Check, Shield, LogOut } from 'lucide-react'
+import { Upload, MessageSquare, FileText, Loader2, Crown, Send, X, User, Mail, ChevronRight, Check, Shield, LogOut, AlertTriangle } from 'lucide-react'
+
+const MAX_PAGES_FREE = 50
+const MAX_PAGES_PRO = 150
 
 function usePdfJs() {
   const [ready, setReady] = useState(false)
@@ -14,7 +17,7 @@ function usePdfJs() {
   return ready
 }
 
-async function extractText(file: File): Promise<string> {
+async function extractTextWithPageCount(file: File): Promise<{ text: string; pageCount: number }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = async (e) => {
@@ -23,6 +26,7 @@ async function extractText(file: File): Promise<string> {
         pdfjsLib.GlobalWorkerOptions.workerSrc =
           'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
         const pdf = await pdfjsLib.getDocument({ data: e.target!.result }).promise
+        const pageCount = pdf.numPages
         let text = ''
         for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i)
@@ -30,7 +34,7 @@ async function extractText(file: File): Promise<string> {
           text += `\n\n--- Page ${i} of ${pdf.numPages} ---\n`
           text += content.items.map((item: any) => item.str).join(' ')
         }
-        resolve(text.trim())
+        resolve({ text: text.trim(), pageCount })
       } catch (err) { reject(err) }
     }
     reader.onerror = reject
@@ -44,14 +48,12 @@ interface Message { role: string; text: string }
 function saveUser(u: AppUser) {
   try { localStorage.setItem('pdf_user', JSON.stringify(u)) } catch {}
 }
-
 function loadUser(): AppUser | null {
   try {
     const saved = localStorage.getItem('pdf_user')
     return saved ? JSON.parse(saved) : null
   } catch { return null }
 }
-
 function clearUser() {
   try { localStorage.removeItem('pdf_user') } catch {}
 }
@@ -78,7 +80,6 @@ function SignupModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: (
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
-
   const clearErr = () => setErr('')
 
   const handleSignup = async () => {
@@ -184,7 +185,7 @@ const PLANS = [
   { id: 'yearly', label: 'Yearly', price: '$1.99', period: '/mo', desc: 'Billed $23.88/yr · Save 33%' },
 ]
 
-function PaywallModal({ user, onClose }: { user: AppUser; onClose: () => void }) {
+function PaywallModal({ user, onClose, message }: { user: AppUser; onClose: () => void; message?: string }) {
   const [plan, setPlan] = useState('yearly')
   const [loading, setLoading] = useState(false)
 
@@ -197,7 +198,7 @@ function PaywallModal({ user, onClose }: { user: AppUser; onClose: () => void })
         body: JSON.stringify({ plan, userId: user.id, email: user.email })
       })
       const data = await res.json()
-      if (!data.url) throw new Error(data.error || 'No checkout URL returned. Please try again.')
+      if (!data.url) throw new Error(data.error || 'No checkout URL returned.')
       window.location.href = data.url
     } catch (e: any) {
       alert('Payment error: ' + e.message)
@@ -213,7 +214,9 @@ function PaywallModal({ user, onClose }: { user: AppUser; onClose: () => void })
             <Crown className="w-7 h-7 text-white" />
           </div>
           <h2 className="text-2xl font-bold">Unlock Unlimited Access</h2>
-          <p className="text-gray-500 text-sm mt-1">You've used your 1 free summary. Upgrade to continue.</p>
+          <p className="text-gray-500 text-sm mt-1">
+            {message || "You've used your 1 free summary. Upgrade to continue."}
+          </p>
         </div>
         <div className="space-y-3 mb-5">
           {PLANS.map(p => (
@@ -231,7 +234,12 @@ function PaywallModal({ user, onClose }: { user: AppUser; onClose: () => void })
           ))}
         </div>
         <ul className="text-sm text-gray-600 space-y-2 mb-5">
-          {['Unlimited PDF summaries', 'Full Q&A on every document', 'Priority processing'].map(f => (
+          {[
+            'Up to 150 pages per document',
+            'Unlimited PDF summaries',
+            'Full Q&A on every document',
+            'Priority processing'
+          ].map(f => (
             <li key={f} className="flex items-center gap-2"><Check className="w-4 h-4 text-green-500 flex-shrink-0" />{f}</li>
           ))}
         </ul>
@@ -251,41 +259,28 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   const [authed, setAuthed] = useState(false)
   const [adminPass, setAdminPass] = useState('')
   const [passErr, setPassErr] = useState('')
-
   const ADMIN_PASSWORD = 'pdfadmin2026'
 
-  useEffect(() => {
-    if (authed) fetchUsers()
-  }, [authed])
+  useEffect(() => { if (authed) fetchUsers() }, [authed])
 
   const fetchUsers = () => {
     setLoading(true)
-    fetch('/api/admin/users')
-      .then(r => r.json())
-      .then(d => { setUsers(d.users || []); setLoading(false) })
+    fetch('/api/admin/users').then(r => r.json()).then(d => { setUsers(d.users || []); setLoading(false) })
   }
 
   const handleLogin = () => {
-    if (adminPass === ADMIN_PASSWORD) {
-      setAuthed(true)
-    } else {
-      setPassErr('Incorrect password. Try again.')
-    }
+    if (adminPass === ADMIN_PASSWORD) { setAuthed(true) }
+    else { setPassErr('Incorrect password. Try again.') }
   }
 
   const handleDelete = async (userId: string, email: string) => {
     if (!window.confirm(`Delete user ${email}? This cannot be undone.`)) return
     setActionLoading(userId + 'delete')
     try {
-      const res = await fetch('/api/admin/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delete', userId })
-      })
+      const res = await fetch('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', userId }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      alert('✅ User deleted')
-      fetchUsers()
+      alert('✅ User deleted'); fetchUsers()
     } catch (e: any) { alert('Error: ' + e.message) }
     setActionLoading(null)
   }
@@ -294,11 +289,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
     if (!window.confirm(`Send password reset email to ${email}?`)) return
     setActionLoading(email + 'reset')
     try {
-      const res = await fetch('/api/admin/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reset_password', email })
-      })
+      const res = await fetch('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reset_password', email }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       alert('✅ Password reset email sent to ' + email)
@@ -307,21 +298,14 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   }
 
   const handleAction = async (action: string, userId: string, subscriptionId: string | null) => {
-    const confirmMsg = action === 'refund'
-      ? 'Issue a refund AND cancel this subscription? This cannot be undone.'
-      : 'Cancel this subscription? This cannot be undone.'
+    const confirmMsg = action === 'refund' ? 'Issue a refund AND cancel this subscription? This cannot be undone.' : 'Cancel this subscription? This cannot be undone.'
     if (!window.confirm(confirmMsg)) return
     setActionLoading(userId + action)
     try {
-      const res = await fetch('/api/admin/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, userId, subscriptionId })
-      })
+      const res = await fetch('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, userId, subscriptionId }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      alert('✅ ' + data.message)
-      fetchUsers()
+      alert('✅ ' + data.message); fetchUsers()
     } catch (e: any) { alert('Error: ' + e.message) }
     setActionLoading(null)
   }
@@ -330,67 +314,43 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
     if (!window.confirm('Manually upgrade this user to Pro?')) return
     setActionLoading(userId + 'upgrade')
     try {
-      const res = await fetch('/api/admin/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'upgrade', userId })
-      })
+      const res = await fetch('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'upgrade', userId }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      alert('✅ User upgraded to Pro')
-      fetchUsers()
+      alert('✅ User upgraded to Pro'); fetchUsers()
     } catch (e: any) { alert('Error: ' + e.message) }
     setActionLoading(null)
   }
 
   const exportToCSV = () => {
     const headers = ['Name', 'Email', 'Plan', 'PDFs Used', 'Joined']
-    const rows = users.map(u => [
-      u.name, u.email, u.plan,
-      u.pdf_used || 0,
-      new Date(u.created_at).toLocaleDateString()
-    ])
-    const csv = [headers, ...rows]
-      .map(r => r.map((v: any) => `"${v}"`).join(','))
-      .join('\n')
+    const rows = users.map(u => [u.name, u.email, u.plan, u.pdf_used || 0, new Date(u.created_at).toLocaleDateString()])
+    const csv = [headers, ...rows].map(r => r.map((v: any) => `"${v}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `users-${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
+    const a = document.createElement('a'); a.href = url
+    a.download = `users-${new Date().toISOString().slice(0, 10)}.csv`; a.click()
     URL.revokeObjectURL(url)
   }
 
-  const badge = (p: string) =>
-    p === 'free' ? 'bg-gray-100 text-gray-600' :
-    p === 'monthly' ? 'bg-blue-100 text-blue-700' :
-    'bg-yellow-100 text-yellow-700'
+  const badge = (p: string) => p === 'free' ? 'bg-gray-100 text-gray-600' : p === 'monthly' ? 'bg-blue-100 text-blue-700' : 'bg-yellow-100 text-yellow-700'
 
   if (!authed) return (
     <Modal onClose={onClose}>
       <div className="p-8">
         <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
-            <Shield className="w-5 h-5 text-purple-600" />
-          </div>
-          <div>
-            <h2 className="text-xl font-bold">Admin Access</h2>
-            <p className="text-sm text-gray-500">Enter your admin password to continue</p>
-          </div>
+          <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center"><Shield className="w-5 h-5 text-purple-600" /></div>
+          <div><h2 className="text-xl font-bold">Admin Access</h2><p className="text-sm text-gray-500">Enter your admin password to continue</p></div>
         </div>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input type="password" value={adminPass}
-              onChange={e => { setAdminPass(e.target.value); setPassErr('') }}
-              onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              placeholder="Enter admin password"
+            <input type="password" value={adminPass} onChange={e => { setAdminPass(e.target.value); setPassErr('') }}
+              onKeyDown={e => e.key === 'Enter' && handleLogin()} placeholder="Enter admin password"
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-sm" />
           </div>
           {passErr && <p className="text-red-500 text-sm bg-red-50 px-3 py-2 rounded-lg">{passErr}</p>}
-          <button onClick={handleLogin}
-            className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition flex items-center justify-center gap-2">
+          <button onClick={handleLogin} className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition flex items-center justify-center gap-2">
             <Shield className="w-4 h-4" /> Access Admin Panel
           </button>
         </div>
@@ -403,72 +363,52 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
       <div className="p-8">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
-              <Shield className="w-5 h-5 text-purple-600" />
-            </div>
-            <div>
-              <h2 className="text-xl font-bold">Admin — User List</h2>
-              <p className="text-sm text-gray-500">{users.length} user{users.length !== 1 ? 's' : ''} registered</p>
-            </div>
+            <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center"><Shield className="w-5 h-5 text-purple-600" /></div>
+            <div><h2 className="text-xl font-bold">Admin — User List</h2><p className="text-sm text-gray-500">{users.length} user{users.length !== 1 ? 's' : ''} registered</p></div>
           </div>
-          <button onClick={exportToCSV}
-            className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-full hover:bg-green-700 transition">
-            ⬇️ Export CSV
-          </button>
+          <button onClick={exportToCSV} className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-full hover:bg-green-700 transition">⬇️ Export CSV</button>
         </div>
-        {loading
-          ? <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-400 w-6 h-6" /></div>
-          : users.length === 0
-          ? <p className="text-center text-gray-400 py-8 text-sm">No users yet.</p>
+        {loading ? <div className="flex justify-center py-8"><Loader2 className="animate-spin text-gray-400 w-6 h-6" /></div>
+          : users.length === 0 ? <p className="text-center text-gray-400 py-8 text-sm">No users yet.</p>
           : <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
               {users.map(u => (
                 <div key={u.id} className="bg-gray-50 rounded-xl px-4 py-3">
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="font-semibold text-sm">{u.name}</div>
-                      <div className="text-xs text-gray-500 flex items-center gap-1">
-                        <Mail className="w-3 h-3" />{u.email}
-                      </div>
-                      <div className="text-xs text-gray-400 mt-0.5">
-                        Joined {new Date(u.created_at).toLocaleDateString()} · {u.pdf_used || 0} PDFs used
-                      </div>
+                      <div className="text-xs text-gray-500 flex items-center gap-1"><Mail className="w-3 h-3" />{u.email}</div>
+                      <div className="text-xs text-gray-400 mt-0.5">Joined {new Date(u.created_at).toLocaleDateString()} · {u.pdf_used || 0} PDFs used</div>
                     </div>
                     <span className={`text-xs font-semibold px-2 py-1 rounded-full capitalize ${badge(u.plan)}`}>
                       {u.plan === 'free' ? 'Free' : u.plan === 'monthly' ? 'Monthly Pro' : 'Yearly Pro'}
                     </span>
                   </div>
                   <div className="flex flex-wrap gap-2 mt-2">
-                    <button onClick={() => handleResetPassword(u.email)} disabled={!!actionLoading}
-                      className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-lg hover:bg-blue-200 transition disabled:opacity-50">
+                    <button onClick={() => handleResetPassword(u.email)} disabled={!!actionLoading} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-lg hover:bg-blue-200 transition disabled:opacity-50">
                       {actionLoading === u.email + 'reset' ? '...' : '🔑 Reset Password'}
                     </button>
                     {u.plan === 'free' && (
-                      <button onClick={() => handleUpgrade(u.id)} disabled={!!actionLoading}
-                        className="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-lg hover:bg-yellow-200 transition disabled:opacity-50">
+                      <button onClick={() => handleUpgrade(u.id)} disabled={!!actionLoading} className="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-lg hover:bg-yellow-200 transition disabled:opacity-50">
                         {actionLoading === u.id + 'upgrade' ? '...' : '⭐ Upgrade'}
                       </button>
                     )}
                     {u.plan !== 'free' && (
-                      <button onClick={() => handleAction('cancel', u.id, u.stripe_subscription_id)} disabled={!!actionLoading}
-                        className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-lg hover:bg-orange-200 transition disabled:opacity-50">
+                      <button onClick={() => handleAction('cancel', u.id, u.stripe_subscription_id)} disabled={!!actionLoading} className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-lg hover:bg-orange-200 transition disabled:opacity-50">
                         {actionLoading === u.id + 'cancel' ? '...' : '⛔ Cancel'}
                       </button>
                     )}
                     {u.plan !== 'free' && (
-                      <button onClick={() => handleAction('refund', u.id, u.stripe_subscription_id)} disabled={!!actionLoading}
-                        className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-lg hover:bg-red-200 transition disabled:opacity-50">
+                      <button onClick={() => handleAction('refund', u.id, u.stripe_subscription_id)} disabled={!!actionLoading} className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-lg hover:bg-red-200 transition disabled:opacity-50">
                         {actionLoading === u.id + 'refund' ? '...' : '💸 Refund'}
                       </button>
                     )}
-                    <button onClick={() => handleDelete(u.id, u.email)} disabled={!!actionLoading}
-                      className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded-lg hover:bg-gray-300 transition disabled:opacity-50">
+                    <button onClick={() => handleDelete(u.id, u.email)} disabled={!!actionLoading} className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded-lg hover:bg-gray-300 transition disabled:opacity-50">
                       {actionLoading === u.id + 'delete' ? '...' : '🗑️ Delete'}
                     </button>
                   </div>
                 </div>
               ))}
-            </div>
-        }
+            </div>}
       </div>
     </Modal>
   )
@@ -479,6 +419,7 @@ export default function App() {
   const [user, setUser] = useState<AppUser | null>(null)
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [pdfText, setPdfText] = useState('')
+  const [pageCount, setPageCount] = useState(0)
   const [summary, setSummary] = useState('')
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState('')
@@ -486,37 +427,24 @@ export default function App() {
   const [status, setStatus] = useState('')
   const [instructions, setInstructions] = useState('')
   const [modal, setModal] = useState<string | null>(null)
+  const [paywallMessage, setPaywallMessage] = useState<string | undefined>(undefined)
 
   useEffect(() => {
-    // Load user from localStorage on page load
     const saved = loadUser()
     if (saved) setUser(saved)
-
-    // Handle Stripe success redirect
     const params = new URLSearchParams(window.location.search)
     if (params.get('success') === 'true') {
       window.history.replaceState({}, '', '/')
       const savedUser = loadUser()
       if (savedUser) {
-        // Refresh user plan from database
         fetch('/api/auth/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: savedUser.id })
-        })
-          .then(r => r.json())
-          .then(data => {
-            if (data.user) {
-              setUser(data.user)
-              saveUser(data.user)
-              alert('🎉 Payment successful! Your Pro plan is now active.')
-            }
-          })
-          .catch(() => {
-            alert('🎉 Payment successful! Your Pro plan is now active.')
-          })
-      } else {
-        alert('🎉 Payment successful! Please log in to access Pro features.')
+        }).then(r => r.json()).then(data => {
+          if (data.user) { setUser(data.user); saveUser(data.user) }
+          alert('🎉 Payment successful! Your Pro plan is now active.')
+        }).catch(() => alert('🎉 Payment successful! Your Pro plan is now active.'))
       }
     }
   }, [])
@@ -524,23 +452,22 @@ export default function App() {
   const isPro = user?.plan === 'monthly' || user?.plan === 'yearly'
   const hasUsed = (user?.pdf_used || 0) >= 1
   const canUpload = user && (isPro || !hasUsed)
+  const maxPages = isPro ? MAX_PAGES_PRO : MAX_PAGES_FREE
 
   const handleLogout = () => {
-    clearUser()
-    setUser(null)
-    setSummary('')
-    setMessages([])
-    setPdfFile(null)
-    setPdfText('')
+    clearUser(); setUser(null); setSummary('')
+    setMessages([]); setPdfFile(null); setPdfText(''); setPageCount(0)
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = ''
+    const file = e.target.files?.[0]; e.target.value = ''
     if (!file || file.type !== 'application/pdf') { alert('Please upload a PDF file.'); return }
     if (!user) { setModal('signup'); return }
-    if (!canUpload) { setModal('paywall'); return }
-    setPdfFile(file); setSummary(''); setMessages([]); setPdfText('')
+    if (!canUpload) {
+      setPaywallMessage("You've used your 1 free summary. Upgrade to Pro for unlimited summaries.")
+      setModal('paywall'); return
+    }
+    setPdfFile(file); setSummary(''); setMessages([]); setPdfText(''); setPageCount(0)
   }
 
   const handleSummarize = async () => {
@@ -548,21 +475,46 @@ export default function App() {
     if (!pdfJsReady) { alert('PDF reader loading, please wait.'); return }
     setLoading(true); setSummary(''); setStatus('📄 Reading PDF...')
     try {
-      const text = await extractText(pdfFile)
+      const { text, pageCount: pages } = await extractTextWithPageCount(pdfFile)
+      setPageCount(pages)
+
+      // Check page limits
+      if (!isPro && pages > MAX_PAGES_FREE) {
+        setLoading(false); setStatus('')
+        setPaywallMessage(`This document has ${pages} pages. Free plan supports up to ${MAX_PAGES_FREE} pages. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`)
+        setModal('paywall'); return
+      }
+
+      if (isPro && pages > MAX_PAGES_PRO) {
+        setLoading(false); setStatus('')
+        alert(`This document has ${pages} pages. Our current limit is ${MAX_PAGES_PRO} pages per document. Please split your document into smaller sections.`)
+        return
+      }
+
       if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
       setPdfText(text)
 
-      const CHUNK_SIZE = 15000
+      // Warn for large documents
+      if (pages > 50) {
+        setStatus(`⚠️ Large document (${pages} pages) — results will appear progressively...`)
+        await new Promise(r => setTimeout(r, 1500))
+      }
+
+      // Larger chunks = fewer API calls = faster
+      const CHUNK_SIZE = 25000
       const chunks: string[] = []
       for (let i = 0; i < text.length; i += CHUNK_SIZE) {
         chunks.push(text.slice(i, i + CHUNK_SIZE))
       }
 
-      setStatus(`🤖 Summarizing ${chunks.length} sections in parallel...`)
-      const results: string[] = new Array(chunks.length).fill('')
+      const totalChunks = chunks.length
+      const results: string[] = new Array(totalChunks).fill('')
+      let completed = 0
 
-      await Promise.all(
-        chunks.map(async (chunk, i) => {
+      setStatus(`🤖 Summarizing ${pages} pages in ${totalChunks} sections...`)
+
+      const processChunk = async (chunk: string, i: number, retryCount = 0): Promise<void> => {
+        try {
           const res = await fetch('/api/summarize', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -571,17 +523,24 @@ export default function App() {
               text: chunk,
               instructions,
               chunkIndex: i,
-              totalChunks: chunks.length,
+              totalChunks,
               isFirst: i === 0
             })
           })
-
           const rawText = await res.text()
           let data: any = {}
-          try {
-            data = JSON.parse(rawText)
-          } catch {
-            throw new Error(`Section ${i + 1} timed out. Please try again.`)
+          try { data = JSON.parse(rawText) } catch {
+            throw new Error(`Section ${i + 1} failed. Retrying...`)
+          }
+
+          if (res.status === 429 || res.status === 529 || data.error === 'rate_limited' || data.error === 'overloaded') {
+            if (retryCount < 5) {
+              const waitTime = (retryCount + 1) * 8000
+              setStatus(`⏳ AI busy — retrying section ${i + 1} in ${Math.round(waitTime / 1000)}s...`)
+              await new Promise(r => setTimeout(r, waitTime))
+              return processChunk(chunk, i, retryCount + 1)
+            }
+            throw new Error(`Section ${i + 1} failed after retries. Please try again.`)
           }
 
           if (!res.ok) {
@@ -590,17 +549,33 @@ export default function App() {
           }
 
           results[i] = data.summary
-          const done = results.filter(r => r !== '').length
-          setStatus(`🤖 ${done} of ${chunks.length} sections complete...`)
+          completed++
+          setStatus(`🤖 ${completed} of ${totalChunks} sections complete...`)
           setSummary(results.join('\n\n').trim())
-        })
-      )
+        } catch (e: any) {
+          if (retryCount < 3) {
+            await new Promise(r => setTimeout(r, (retryCount + 1) * 5000))
+            return processChunk(chunk, i, retryCount + 1)
+          }
+          throw e
+        }
+      }
+
+      // Process in batches of 5 for speed + rate limit balance
+      const BATCH_SIZE = 5
+      for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length)
+        const batch = chunks.slice(batchStart, batchEnd)
+        await Promise.all(batch.map((chunk, batchIndex) => processChunk(chunk, batchStart + batchIndex)))
+        if (batchEnd < chunks.length) {
+          await new Promise(r => setTimeout(r, 1000))
+        }
+      }
 
       setUser(prev => {
         if (!prev) return prev
         const updated = { ...prev, pdf_used: (prev.pdf_used || 0) + 1 }
-        saveUser(updated)
-        return updated
+        saveUser(updated); return updated
       })
     } catch (e: any) {
       alert('Error: ' + e.message)
@@ -630,15 +605,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
-      {modal === 'signup' && (
-        <SignupModal onClose={() => setModal(null)} onSuccess={u => { setUser(u); setModal(null) }} />
-      )}
-      {modal === 'paywall' && user && (
-        <PaywallModal user={user} onClose={() => setModal(null)} />
-      )}
-      {modal === 'admin' && (
-        <AdminPanel onClose={() => setModal(null)} />
-      )}
+      {modal === 'signup' && <SignupModal onClose={() => setModal(null)} onSuccess={u => { setUser(u); setModal(null) }} />}
+      {modal === 'paywall' && user && <PaywallModal user={user} onClose={() => setModal(null)} message={paywallMessage} />}
+      {modal === 'admin' && <AdminPanel onClose={() => setModal(null)} />}
 
       <div className="max-w-4xl mx-auto">
         <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
@@ -654,31 +623,28 @@ export default function App() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => setModal('admin')}
-                  className="text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-3 py-1.5 rounded-full flex items-center gap-1 transition">
+                <button onClick={() => setModal('admin')} className="text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-3 py-1.5 rounded-full flex items-center gap-1 transition">
                   <Shield className="w-3 h-3" /> Admin
                 </button>
                 {user ? (
                   <div className="flex items-center gap-2 ml-2">
                     <div className="text-right text-sm">
                       <div className="font-semibold">{user.name}</div>
-                      <div className="text-blue-200 text-xs">{isPro ? 'Pro Member' : 'Free (1 PDF)'}</div>
+                      <div className="text-blue-200 text-xs">{isPro ? `Pro — up to ${MAX_PAGES_PRO} pages` : `Free — up to ${MAX_PAGES_FREE} pages`}</div>
                     </div>
                     {isPro
                       ? <Crown className="w-5 h-5 text-yellow-300" />
-                      : <button onClick={() => setModal('paywall')}
+                      : <button onClick={() => { setPaywallMessage(undefined); setModal('paywall') }}
                           className="text-xs bg-yellow-400 text-yellow-900 font-semibold px-3 py-1.5 rounded-full hover:bg-yellow-300 transition">
                           Upgrade
                         </button>
                     }
-                    <button onClick={handleLogout}
-                      className="text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-2 py-1.5 rounded-full transition flex items-center gap-1">
+                    <button onClick={handleLogout} className="text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-2 py-1.5 rounded-full transition flex items-center gap-1">
                       <LogOut className="w-3 h-3" /> Log Out
                     </button>
                   </div>
                 ) : (
-                  <button onClick={() => setModal('signup')}
-                    className="ml-2 text-sm bg-white text-blue-700 font-semibold px-4 py-2 rounded-full hover:bg-blue-50 transition">
+                  <button onClick={() => setModal('signup')} className="ml-2 text-sm bg-white text-blue-700 font-semibold px-4 py-2 rounded-full hover:bg-blue-50 transition">
                     Sign Up Free
                   </button>
                 )}
@@ -688,20 +654,29 @@ export default function App() {
 
           {/* Upload */}
           <div className="p-6 border-b">
+
+            {/* Page limit info banner */}
+            {user && (
+              <div className={`mb-4 px-4 py-3 rounded-xl text-sm flex items-center gap-2 ${isPro ? 'bg-blue-50 text-blue-700' : 'bg-yellow-50 text-yellow-700'}`}>
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                {isPro
+                  ? `Pro plan: up to ${MAX_PAGES_PRO} pages per document. Results appear in under 2 minutes.`
+                  : `Free plan: up to ${MAX_PAGES_FREE} pages per document. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`}
+              </div>
+            )}
+
             <label
               className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-xl transition-colors
                 ${canUpload ? 'border-gray-300 hover:border-blue-500 hover:bg-blue-50 cursor-pointer' : 'border-gray-200 bg-gray-50 cursor-pointer'}`}
               onClick={!canUpload ? () => user ? setModal('paywall') : setModal('signup') : undefined}>
               <Upload className={`w-8 h-8 mb-2 ${canUpload ? 'text-gray-400' : 'text-gray-300'}`} />
               <p className={`text-sm font-medium ${canUpload ? 'text-gray-600' : 'text-gray-400'}`}>
-                {pdfFile ? pdfFile.name : canUpload ? 'Click to upload a PDF' : !user ? 'Sign up to get started' : 'Upgrade to upload more PDFs'}
+                {pdfFile ? `${pdfFile.name}${pageCount > 0 ? ` (${pageCount} pages)` : ''}` : canUpload ? 'Click to upload a PDF' : !user ? 'Sign up to get started' : 'Upgrade to upload more PDFs'}
               </p>
               <p className="text-xs text-gray-400 mt-1">
-                {canUpload ? 'PDF files only' : !user ? 'Free — includes 1 PDF summary' : '1 free summary used'}
+                {canUpload ? `PDF files only · Max ${maxPages} pages` : !user ? 'Free — includes 1 PDF summary' : '1 free summary used'}
               </p>
-              {canUpload && (
-                <input type="file" className="hidden" accept="application/pdf" onChange={handleFileChange} />
-              )}
+              {canUpload && <input type="file" className="hidden" accept="application/pdf" onChange={handleFileChange} />}
             </label>
 
             <input type="text" value={instructions} onChange={e => setInstructions(e.target.value)}
@@ -740,9 +715,7 @@ export default function App() {
               <div className="space-y-3 mb-4 max-h-80 overflow-y-auto">
                 {messages.map((m, i) => (
                   <div key={i} className={`p-3 rounded-xl text-sm ${m.role === 'user' ? 'bg-blue-100 ml-8' : 'bg-gray-100 mr-8'}`}>
-                    <p className="font-semibold mb-1 text-xs uppercase tracking-wide text-gray-500">
-                      {m.role === 'user' ? 'You' : 'Assistant'}
-                    </p>
+                    <p className="font-semibold mb-1 text-xs uppercase tracking-wide text-gray-500">{m.role === 'user' ? 'You' : 'Assistant'}</p>
                     <p className="text-gray-700 whitespace-pre-wrap">{m.text}</p>
                   </div>
                 ))}
@@ -760,7 +733,6 @@ export default function App() {
               </div>
             </div>
           )}
-
         </div>
       </div>
     </div>

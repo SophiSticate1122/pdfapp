@@ -20,10 +20,9 @@ async function callClaudeWithRetry(anthropic: Anthropic, params: any, retries = 
     } catch (e: any) {
       const isRateLimit = e?.status === 429 || e?.message?.includes('rate limit')
       const isOverload = e?.status === 529 || e?.message?.includes('overloaded')
-
       if ((isRateLimit || isOverload) && attempt < retries - 1) {
-        const waitTime = (attempt + 1) * 3000 // 3s, 6s, 9s, 12s
-        console.log(`Rate limited or overloaded. Retrying in ${waitTime}ms (attempt ${attempt + 1} of ${retries})...`)
+        const waitTime = (attempt + 1) * 5000
+        console.log(`Rate limited. Waiting ${waitTime}ms before retry ${attempt + 1}...`)
         await new Promise(r => setTimeout(r, waitTime))
         continue
       }
@@ -41,16 +40,13 @@ export async function POST(req: NextRequest) {
     if (!userId || !text)
       return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
 
-    // Only check/update usage on the first chunk
     if (isFirst) {
       const { data: user } = await supabaseAdmin
         .from('users').select('*').eq('id', userId).single()
-
       if (!user)
         return NextResponse.json({ error: 'User not found' }, { status: 401 })
       if (user.plan === 'free' && user.pdf_used >= 1)
         return NextResponse.json({ error: 'upgrade_required' }, { status: 403 })
-
       await supabaseAdmin.from('users')
         .update({ pdf_used: (user.pdf_used || 0) + 1 })
         .eq('id', userId)
@@ -58,7 +54,6 @@ export async function POST(req: NextRequest) {
 
     const prompt = `You are an expert document analyst and educator. Analyze the following section of a document (part ${chunkIndex + 1} of ${totalChunks}).
 ${instructions ? `Special instructions: ${instructions}\n` : ''}
-
 For EACH PAGE in this section, provide a structured summary using EXACTLY this format:
 
 Page X
@@ -71,11 +66,11 @@ Page X
 **Critiques:** Identify any weaknesses, assumptions, gaps, counterarguments, or limitations.
 
 IMPORTANT RULES:
-- Cover EVERY single page in this section — do not skip any pages
+- Cover EVERY single page in this section
 - Each page summary should be at least 250 words total
 - The Arguments section alone should be at least 150 words
-- Be thorough and educational — write for someone who has never read this document
-- Only use information from the document — do not add outside information
+- Be thorough and educational
+- Only use information from the document
 
 DOCUMENT SECTION ${chunkIndex + 1} OF ${totalChunks}:
 ${text}`
@@ -94,20 +89,12 @@ ${text}`
     return NextResponse.json({ summary, chunkIndex })
   } catch (e: any) {
     console.error('Summarize error:', e)
-
-    // Return friendly error messages
     if (e?.status === 429) {
-      return NextResponse.json({
-        error: 'Our AI is currently busy due to high demand. Please try again in a few seconds.'
-      }, { status: 429 })
+      return NextResponse.json({ error: 'rate_limited', message: 'AI is busy. Retrying automatically.' }, { status: 429 })
     }
-
     if (e?.status === 529) {
-      return NextResponse.json({
-        error: 'Our AI service is temporarily overloaded. Please try again in a moment.'
-      }, { status: 529 })
+      return NextResponse.json({ error: 'overloaded', message: 'AI overloaded. Retrying automatically.' }, { status: 529 })
     }
-
     return NextResponse.json({ error: e.message }, { status: 500 })
   }
 }
