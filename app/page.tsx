@@ -58,7 +58,6 @@ function clearUser() {
   try { localStorage.removeItem('pdf_user') } catch {}
 }
 
-// Export summary to Word document
 function exportToWord(summary: string, fileName: string) {
   const title = `PDF Summary — ${fileName}`
   const html = `
@@ -461,6 +460,32 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   )
 }
 
+// ── Progress Bar Component ──────────────────────────────────────────────────
+function ProgressBar({ completed, total, fileName }: { completed: number; total: number; fileName: string }) {
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0
+  return (
+    <div className="mt-4 bg-blue-50 rounded-xl p-4 border border-blue-100">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-semibold text-blue-700">📄 {fileName}</span>
+        <span className="text-sm font-bold text-blue-700">{pct}%</span>
+      </div>
+      <div className="w-full bg-blue-100 rounded-full h-3 mb-2">
+        <div
+          className="bg-gradient-to-r from-blue-500 to-indigo-500 h-3 rounded-full transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <p className="text-xs text-blue-600">
+        {completed === 0
+          ? '🔄 Starting up...'
+          : completed === total
+          ? '✅ Complete!'
+          : `🤖 Processing section ${completed} of ${total} — results appearing below...`}
+      </p>
+    </div>
+  )
+}
+
 export default function App() {
   const pdfJsReady = usePdfJs()
   const [user, setUser] = useState<AppUser | null>(null)
@@ -472,6 +497,7 @@ export default function App() {
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
+  const [progress, setProgress] = useState({ completed: 0, total: 0 })
   const [instructions, setInstructions] = useState('')
   const [modal, setModal] = useState<string | null>(null)
   const [paywallMessage, setPaywallMessage] = useState<string | undefined>(undefined)
@@ -530,12 +556,15 @@ export default function App() {
       setModal('paywall'); return
     }
     setPdfFile(file); setSummary(''); setMessages([]); setPdfText(''); setPageCount(0)
+    setProgress({ completed: 0, total: 0 })
   }
 
   const handleSummarize = async () => {
     if (!pdfFile || !user) return
     if (!pdfJsReady) { alert('PDF reader loading, please wait.'); return }
     setLoading(true); setSummary(''); setStatus('📄 Reading PDF...')
+    setProgress({ completed: 0, total: 0 })
+
     try {
       const { text, pageCount: pages } = await extractTextWithPageCount(pdfFile)
       setPageCount(pages)
@@ -555,11 +584,6 @@ export default function App() {
       if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
       setPdfText(text)
 
-      if (pages > 50) {
-        setStatus(`⚠️ Large document (${pages} pages) — results will appear progressively...`)
-        await new Promise(r => setTimeout(r, 1500))
-      }
-
       const CHUNK_SIZE = 25000
       const chunks: string[] = []
       for (let i = 0; i < text.length; i += CHUNK_SIZE) {
@@ -570,15 +594,14 @@ export default function App() {
       const results: string[] = new Array(totalChunks).fill('')
       let completed = 0
 
-      setStatus(`🤖 Summarizing ${pages} pages across ${totalChunks} sections...`)
+      setProgress({ completed: 0, total: totalChunks })
+      setStatus('')
 
-      const processChunkWithRetry = async (chunk: string, i: number): Promise<void> => {
-        const maxRetries = 6
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
+      // Process one chunk at a time — most reliable, no timeouts
+      const processChunk = async (chunk: string, i: number): Promise<void> => {
+        let lastError = ''
+        for (let attempt = 0; attempt < 10; attempt++) {
           try {
-            const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), 55000)
-
             const res = await fetch('/api/summarize', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -589,71 +612,62 @@ export default function App() {
                 chunkIndex: i,
                 totalChunks,
                 isFirst: i === 0
-              }),
-              signal: controller.signal
+              })
             })
-            clearTimeout(timeoutId)
 
             const rawText = await res.text()
             let data: any = {}
             try { data = JSON.parse(rawText) } catch {
-              if (attempt < maxRetries - 1) {
-                await new Promise(r => setTimeout(r, (attempt + 1) * 3000))
-                continue
-              }
-              throw new Error(`Section ${i + 1} failed to parse.`)
+              lastError = 'Parse error'
+              await new Promise(r => setTimeout(r, 3000))
+              continue
             }
 
-            if (res.status === 429 || res.status === 529 || data.error === 'rate_limited' || data.error === 'overloaded') {
-              const waitTime = (attempt + 1) * 8000
-              setStatus(`⏳ AI busy — waiting ${Math.round(waitTime / 1000)}s before retrying section ${i + 1}... (${completed}/${totalChunks} done)`)
-              await new Promise(r => setTimeout(r, waitTime))
+            // Credit error — stop immediately
+            if (rawText.includes('credit balance') || rawText.includes('too low')) {
+              throw new Error('Insufficient API credits. Please contact support.')
+            }
+
+            // Rate limit — wait longer
+            if (res.status === 429 || data.error === 'rate_limited') {
+              const wait = (attempt + 1) * 10000
+              setStatus(`⏳ AI is busy — waiting ${Math.round(wait / 1000)}s... (section ${i + 1})`)
+              await new Promise(r => setTimeout(r, wait))
+              continue
+            }
+
+            // Overloaded — wait
+            if (res.status === 529 || data.error === 'overloaded') {
+              await new Promise(r => setTimeout(r, 8000))
               continue
             }
 
             if (!res.ok) {
               if (data.error === 'upgrade_required') { setModal('paywall'); return }
-              if (attempt < maxRetries - 1) {
-                await new Promise(r => setTimeout(r, (attempt + 1) * 3000))
-                continue
-              }
-              throw new Error(data.error)
+              lastError = data.error || 'Unknown error'
+              await new Promise(r => setTimeout(r, 3000))
+              continue
             }
 
+            // Success!
             results[i] = data.summary
             completed++
-            setStatus(`🤖 ${completed} of ${totalChunks} sections complete...`)
-            setSummary(results.filter(r => r !== '').length > 0 ? results.join('\n\n').trim() : '')
+            setProgress({ completed, total: totalChunks })
+            setSummary(results.join('\n\n').trim())
             return
 
           } catch (e: any) {
-            if (e.name === 'AbortError') {
-              if (attempt < maxRetries - 1) {
-                setStatus(`⏳ Section ${i + 1} timed out — retrying... (attempt ${attempt + 2}/${maxRetries})`)
-                await new Promise(r => setTimeout(r, (attempt + 1) * 4000))
-                continue
-              }
-            }
-            if (attempt < maxRetries - 1) {
-              await new Promise(r => setTimeout(r, (attempt + 1) * 3000))
-              continue
-            }
-            throw new Error(`Section ${i + 1} failed after ${maxRetries} attempts: ${e.message}`)
+            if (e.message.includes('credit')) throw e
+            lastError = e.message
+            await new Promise(r => setTimeout(r, 3000))
           }
         }
+        throw new Error(`Section ${i + 1} failed: ${lastError}`)
       }
 
-      const BATCH_SIZE = 3
-      for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
-        const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length)
-        const batchChunks = chunks.slice(batchStart, batchEnd)
-        setStatus(`🤖 Processing sections ${batchStart + 1}–${batchEnd} of ${totalChunks}...`)
-        await Promise.all(
-          batchChunks.map((chunk, idx) => processChunkWithRetry(chunk, batchStart + idx))
-        )
-        if (batchEnd < chunks.length) {
-          await new Promise(r => setTimeout(r, 1500))
-        }
+      // Process sequentially — one at a time, never times out
+      for (let i = 0; i < chunks.length; i++) {
+        await processChunk(chunks[i], i)
       }
 
       setSummary(results.join('\n\n').trim())
@@ -744,8 +758,8 @@ export default function App() {
               <div className={`mb-4 px-4 py-3 rounded-xl text-sm flex items-center gap-2 ${isPro ? 'bg-blue-50 text-blue-700' : 'bg-yellow-50 text-yellow-700'}`}>
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 {isPro
-                  ? `Pro plan: up to ${MAX_PAGES_PRO} pages per document. Results appear progressively.`
-                  : `Free plan: up to ${MAX_PAGES_FREE} pages per document. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`}
+                  ? `Pro plan: up to ${MAX_PAGES_PRO} pages per document. Results appear section by section.`
+                  : `Free plan: up to ${MAX_PAGES_FREE} pages. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`}
               </div>
             )}
 
@@ -771,9 +785,19 @@ export default function App() {
               <button onClick={handleSummarize} disabled={loading}
                 className="mt-4 w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg font-semibold hover:opacity-90 transition disabled:opacity-50 flex items-center justify-center gap-2">
                 {loading
-                  ? <><Loader2 className="w-5 h-5 animate-spin" />{status || 'Processing…'}</>
+                  ? <><Loader2 className="w-5 h-5 animate-spin" />
+                    {status || `Processing${progress.total > 0 ? ` — ${progress.completed}/${progress.total} sections done` : '...'}`}</>
                   : <><Send className="w-5 h-5" /> Summarize PDF</>}
               </button>
+            )}
+
+            {/* Progress Bar */}
+            {loading && progress.total > 0 && pdfFile && (
+              <ProgressBar
+                completed={progress.completed}
+                total={progress.total}
+                fileName={pdfFile.name}
+              />
             )}
           </div>
 
@@ -783,9 +807,12 @@ export default function App() {
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
                   <FileText className="w-5 h-5 text-blue-600" /> Summary
-                  {loading && <span className="text-xs text-blue-500 font-normal animate-pulse">{status}</span>}
+                  {loading && progress.total > 0 && (
+                    <span className="text-xs text-blue-500 font-normal animate-pulse">
+                      {progress.completed}/{progress.total} sections complete...
+                    </span>
+                  )}
                 </h2>
-                {/* Copy and Export buttons */}
                 {!loading && (
                   <div className="flex gap-2">
                     <button onClick={handleCopy}
