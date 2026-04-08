@@ -13,28 +13,14 @@ function getSupabaseAdmin() {
   )
 }
 
-async function callClaudeWithRetry(anthropic: Anthropic, params: any, retries = 8): Promise<any> {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await anthropic.messages.create(params)
-    } catch (e: any) {
-      const isRateLimit = e?.status === 429 || e?.message?.includes('rate limit')
-      const isOverload = e?.status === 529 || e?.message?.includes('overloaded')
-      const isTimeout = e?.message?.includes('timeout') || e?.message?.includes('timed out')
-      if ((isRateLimit || isOverload || isTimeout) && attempt < retries - 1) {
-        const waitTime = (attempt + 1) * 4000
-        console.log(`Retrying in ${waitTime}ms (attempt ${attempt + 1})...`)
-        await new Promise(r => setTimeout(r, waitTime))
-        continue
-      }
-      throw e
-    }
-  }
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+    const anthropic = new Anthropic({ 
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      timeout: 120000, // 2 minute timeout per request
+      maxRetries: 5,   // Anthropic SDK handles retries automatically
+    })
+    
     const supabaseAdmin = getSupabaseAdmin()
     const { userId, text, instructions, chunkIndex, totalChunks, isFirst } = await req.json()
 
@@ -53,7 +39,6 @@ export async function POST(req: NextRequest) {
         .eq('id', userId)
     }
 
-    // Shorter, faster prompt — quality maintained but concise
     const prompt = `You are an expert document analyst. Analyze this document section (part ${chunkIndex + 1} of ${totalChunks}).
 ${instructions ? `Instructions: ${instructions}\n` : ''}
 For EACH PAGE provide this exact format:
@@ -63,16 +48,17 @@ Page X
 **People:** Key people and their roles.
 **Core Concepts:** Main ideas (2-3 sentences each).
 **Arguments:** Thorough explanation (~200 words) — explain reasoning, context, examples so anyone can understand.
-**Methods:** Research methods or evidence used (or "Not applicable").
-**Implications:** Why this matters and what follows from it.
-**Critiques:** Weaknesses, assumptions, gaps, or counterarguments.
+**Methods:** Research methods or evidence (or "Not applicable").
+**Implications:** Why this matters.
+**Critiques:** Weaknesses, assumptions, gaps.
 
-Cover every page. Be educational and thorough.
+Cover every page. Be thorough and educational.
 
 DOCUMENT SECTION ${chunkIndex + 1}/${totalChunks}:
 ${text}`
 
-    const message = await callClaudeWithRetry(anthropic, {
+    // Anthropic SDK with built-in retries handles everything
+    const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }]
@@ -84,10 +70,15 @@ ${text}`
       .join('\n')
 
     return NextResponse.json({ summary, chunkIndex })
+
   } catch (e: any) {
     console.error('Summarize error:', e)
+    
     if (e?.message?.includes('credit') || e?.message?.includes('billing')) {
-      return NextResponse.json({ error: 'insufficient_credits', message: 'API credits exhausted. Please contact support.' }, { status: 402 })
+      return NextResponse.json({ 
+        error: 'insufficient_credits',
+        message: 'API credits exhausted.' 
+      }, { status: 402 })
     }
     if (e?.status === 429) {
       return NextResponse.json({ error: 'rate_limited' }, { status: 429 })

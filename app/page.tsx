@@ -544,120 +544,127 @@ export default function App() {
     setProgress({ completed: 0, total: 0 })
   }
 
-  const handleSummarize = async () => {
-    if (!pdfFile || !user) return
-    if (!pdfJsReady) { alert('PDF reader loading, please wait.'); return }
-    setLoading(true); setSummary(''); setStatus('📄 Reading PDF...')
-    setProgress({ completed: 0, total: 0 })
+const handleSummarize = async () => {
+  if (!pdfFile || !user) return
+  if (!pdfJsReady) { alert('PDF reader loading, please wait.'); return }
+  setLoading(true); setSummary(''); setStatus('📄 Reading PDF...')
+  setProgress({ completed: 0, total: 0 })
 
-    try {
-      const { text, pageCount: pages } = await extractTextWithPageCount(pdfFile)
-      setPageCount(pages)
+  try {
+    const { text, pageCount: pages } = await extractTextWithPageCount(pdfFile)
+    setPageCount(pages)
 
-      if (!isPro && pages > MAX_PAGES_FREE) {
-        setLoading(false); setStatus('')
-        setPaywallMessage(`This document has ${pages} pages. Free plan supports up to ${MAX_PAGES_FREE} pages. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`)
-        setModal('paywall'); return
-      }
-
-      if (isPro && pages > MAX_PAGES_PRO) {
-        setLoading(false); setStatus('')
-        alert(`This document has ${pages} pages. Our current limit is ${MAX_PAGES_PRO} pages. Please split your document into smaller sections.`)
-        return
-      }
-
-      if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
-      setPdfText(text)
-
-      // Small chunks = fast API calls = no timeouts
-      const CHUNK_SIZE = 8000
-      const chunks: string[] = []
-      for (let i = 0; i < text.length; i += CHUNK_SIZE) {
-        chunks.push(text.slice(i, i + CHUNK_SIZE))
-      }
-
-      const totalChunks = chunks.length
-      const results: string[] = new Array(totalChunks).fill('')
-      let completed = 0
-
-      setProgress({ completed: 0, total: totalChunks })
-      setStatus('')
-
-      const processChunk = async (chunk: string, i: number): Promise<void> => {
-        for (let attempt = 0; attempt < 10; attempt++) {
-          try {
-            const res = await fetch('/api/summarize', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                userId: user.id,
-                text: chunk,
-                instructions,
-                chunkIndex: i,
-                totalChunks,
-                isFirst: i === 0
-              })
-            })
-
-            const rawText = await res.text()
-            let data: any = {}
-            try { data = JSON.parse(rawText) } catch {
-              await new Promise(r => setTimeout(r, 2000))
-              continue
-            }
-
-            if (data.error === 'insufficient_credits' || rawText.includes('credit balance')) {
-              throw new Error('API credits exhausted. Please contact support.')
-            }
-            if (res.status === 429 || data.error === 'rate_limited') {
-              const wait = (attempt + 1) * 8000
-              setStatus(`⏳ AI busy — waiting ${Math.round(wait / 1000)}s...`)
-              await new Promise(r => setTimeout(r, wait))
-              continue
-            }
-            if (res.status === 529 || data.error === 'overloaded') {
-              await new Promise(r => setTimeout(r, 5000))
-              continue
-            }
-            if (!res.ok) {
-              if (data.error === 'upgrade_required') { setModal('paywall'); return }
-              await new Promise(r => setTimeout(r, 2000))
-              continue
-            }
-
-            results[i] = data.summary
-            completed++
-            setProgress({ completed, total: totalChunks })
-            setSummary(results.join('\n\n').trim())
-            return
-
-          } catch (e: any) {
-            if (e.message.includes('credits')) throw e
-            await new Promise(r => setTimeout(r, 2000))
-          }
-        }
-        throw new Error(`Section ${i + 1} failed after 10 attempts.`)
-      }
-
-      // Process sequentially — one at a time, never times out
-      for (let i = 0; i < chunks.length; i++) {
-        await processChunk(chunks[i], i)
-      }
-
-      setSummary(results.join('\n\n').trim())
-      setUser(prev => {
-        if (!prev) return prev
-        const updated = { ...prev, pdf_used: (prev.pdf_used || 0) + 1 }
-        saveUser(updated); return updated
-      })
-
-    } catch (e: any) {
-      alert('Error: ' + e.message)
-    } finally {
+    if (!isPro && pages > MAX_PAGES_FREE) {
       setLoading(false); setStatus('')
+      setPaywallMessage(`This document has ${pages} pages. Free plan supports up to ${MAX_PAGES_FREE} pages. Upgrade to Pro for up to ${MAX_PAGES_PRO} pages.`)
+      setModal('paywall'); return
     }
-  }
 
+    if (isPro && pages > MAX_PAGES_PRO) {
+      setLoading(false); setStatus('')
+      alert(`This document has ${pages} pages. Our current limit is ${MAX_PAGES_PRO} pages.`)
+      return
+    }
+
+    if (!text || text.length < 20) throw new Error('Could not extract text. This may be a scanned PDF.')
+    setPdfText(text)
+
+    // 8000 chars per chunk = ~5-8 seconds per API call = never times out
+    const CHUNK_SIZE = 8000
+    const chunks: string[] = []
+    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+      chunks.push(text.slice(i, i + CHUNK_SIZE))
+    }
+
+    const totalChunks = chunks.length
+    const results: string[] = new Array(totalChunks).fill('')
+    let completed = 0
+
+    setProgress({ completed: 0, total: totalChunks })
+    setStatus('')
+
+    // Simple fetch — no AbortController, no client timeout
+    const fetchChunk = async (chunk: string, i: number): Promise<any> => {
+      const res = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          text: chunk,
+          instructions,
+          chunkIndex: i,
+          totalChunks,
+          isFirst: i === 0
+        })
+        // NO signal, NO AbortController — let it run as long as needed
+      })
+      const rawText = await res.text()
+      try { return { status: res.status, data: JSON.parse(rawText) } }
+      catch { return { status: res.status, data: { error: 'parse_error' } } }
+    }
+
+    const processChunk = async (chunk: string, i: number): Promise<void> => {
+      for (let attempt = 0; attempt < 15; attempt++) {
+        try {
+          const { status, data } = await fetchChunk(chunk, i)
+
+          if (data.error === 'insufficient_credits') {
+            throw new Error('API credits exhausted. Please contact support.')
+          }
+          if (status === 429 || data.error === 'rate_limited') {
+            const wait = Math.min((attempt + 1) * 10000, 60000)
+            setStatus(`⏳ AI busy — waiting ${Math.round(wait / 1000)}s before retry...`)
+            await new Promise(r => setTimeout(r, wait))
+            continue
+          }
+          if (status === 529 || data.error === 'overloaded') {
+            await new Promise(r => setTimeout(r, 8000))
+            continue
+          }
+          if (data.error === 'parse_error') {
+            await new Promise(r => setTimeout(r, 3000))
+            continue
+          }
+          if (status !== 200) {
+            if (data.error === 'upgrade_required') { setModal('paywall'); return }
+            await new Promise(r => setTimeout(r, 3000))
+            continue
+          }
+
+          // ✅ Success
+          results[i] = data.summary
+          completed++
+          setProgress({ completed, total: totalChunks })
+          setSummary(results.join('\n\n').trim())
+          return
+
+        } catch (e: any) {
+          if (e.message.includes('credits')) throw e
+          // Network error — wait and retry
+          await new Promise(r => setTimeout(r, 3000))
+        }
+      }
+      throw new Error(`Section ${i + 1} could not be completed. Please try again.`)
+    }
+
+    // Process one at a time — sequential, reliable, never times out
+    for (let i = 0; i < chunks.length; i++) {
+      await processChunk(chunks[i], i)
+    }
+
+    setSummary(results.join('\n\n').trim())
+    setUser(prev => {
+      if (!prev) return prev
+      const updated = { ...prev, pdf_used: (prev.pdf_used || 0) + 1 }
+      saveUser(updated); return updated
+    })
+
+  } catch (e: any) {
+    alert('Error: ' + e.message)
+  } finally {
+    setLoading(false); setStatus('')
+  }
+}
   const handleAsk = async () => {
     if (!question.trim() || !pdfText) return
     const q = question; setQuestion('')
